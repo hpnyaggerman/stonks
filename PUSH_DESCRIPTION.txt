@@ -1,0 +1,75 @@
+GitHub push description – AI Engineer review fixes and improvements
+====================================================================
+
+Use this text to describe your commit/push when pushing to GitHub.
+
+----------------------------------------------------------------------
+BATCH 1 – Fixes (items 1–7)
+----------------------------------------------------------------------
+
+1. Processor – Sentiment merge
+   - Moved the sentiment block out of the insider-data else branch so that
+     sentiment runs for every stock, not only when insider data is missing.
+
+2. Processor – Insider rename
+   - Removed the redundant rename() in process_file(); safe_read_insider()
+     already returns columns insider_shares, insider_amount, insider_buy_flag.
+
+3. Backtest – SPY length
+   - SPY is aligned to common_dates via reindex + ffill + fillna so that
+     spy_values_arr has length len(common_dates).
+
+4. Processor – RSI / abnormal_vol
+   - RSI: avg_loss 0s replaced with 1e-10 before division to avoid div-by-zero.
+   - abnormal_vol: vol_std 0s replaced with 1e-10 before dividing.
+
+5. Backtest – Comment
+   - Updated comment from "> 30%" to "> 80%" to match SPIKE_THRESHOLD = 0.80.
+
+6. Processor – Typo
+   - Docstring "indcators_data" → "indicators_data", "folder.txt" → "folder."
+
+7. Processor – Paths
+   - RAW_DIR, PROCESSED_DIR, STOCK_LIST_PATH are built from
+     _script_dir = os.path.dirname(os.path.abspath(__file__)) so they work
+     regardless of current working directory.
+
+----------------------------------------------------------------------
+BATCH 2 – Implementations (items 8, 10, 11, 12, 13)
+----------------------------------------------------------------------
+
+8. TRAIN_STRIDE
+   - CONFIG in run_forecast_v4.ipynb now includes "TRAIN_STRIDE": 5.
+   - process_stock() uses train_stride = CONFIG.get("TRAIN_STRIDE", max(horizon_days))
+     and the training loop steps with: range(window, len(features_scaled), train_stride).
+
+10. Random seeds
+   - Notebook: RANDOM_SEED = 42 with random.seed, np.random.seed, tf.random.set_seed
+     in the setup/imports cell.
+   - run_backtest_v4.py: RANDOM_SEED = 42 with random.seed and np.random.seed at top.
+
+11. NaN handling at inference
+   - In process_stock_for_inference(): before scaler.transform(), feature values are
+     filled with 0.0 and passed through np.nan_to_num(..., nan=0.0, posinf=1e6, neginf=-1e6)
+     so inference does not fail on NaNs/inf.
+
+12. Class imbalance
+   - New notebook cell before training: loads all cached *_y_train.npy, stacks them,
+     computes per-output (4 horizons) inverse-frequency class weights, and sets
+     class_weights (list of dicts {0: w0, 1: w1}).
+   - model.fit(..., class_weight=class_weights) so training uses class weights for
+     imbalanced binary targets (positive = return > mu+2*sigma).
+
+13. Backtest memory
+   - run_backtest_v4.py: REQUIRED_COLS = ["Date", "Close"] + Pred_Prob_* + Pred_Prob_Std_*
+     and each forecast CSV is loaded with usecols=lambda c: c in REQUIRED_COLS to
+     reduce memory.
+
+----------------------------------------------------------------------
+Files changed
+----------------------------------------------------------------------
+- TrainingData/processor.py  (fixes 1, 2, 4, 6, 7)
+- run_backtest_v4.py         (fix 3, 5; items 10, 13)
+- run_forecast_v4.ipynb      (items 8, 10, 11, 12)
+
+----------------------------------------------------------------------

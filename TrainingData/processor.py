@@ -1,19 +1,44 @@
 """
-The purpose of this script is to process the raw data found in the indcators_data/raw folder
-and place them in the indicators_data/processed folder.txt
-
-
+The purpose of this script is to process the raw data found in the indicators_data/raw folder
+and place them in the indicators_data/processed folder.
 """
-
 import os
 import pandas as pd
 import numpy as np
 
-RAW_DIR = "TrainingData/indicators_data/raw"
-PROCESSED_DIR = "TrainingData/indicators_data/processed"
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+import sys
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
+RAW_DIR = os.path.join(_script_dir, "indicators_data", "raw")
+PROCESSED_DIR = os.path.join(_script_dir, "indicators_data", "processed")
+STOCK_LIST_PATH = os.path.join(_script_dir, "stockList.csv")
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-def process_file(csv_path, output_path):
+
+def load_allowed_tickers():
+    """Load the set of ticker symbols from stockList.csv (only these will be processed)."""
+    path = STOCK_LIST_PATH
+    if not os.path.exists(path):
+        path = os.path.join(_script_dir, "..", "stockList.csv")
+        path = os.path.normpath(path)
+    if not os.path.exists(path):
+        print(f"[WARNING] stockList.csv not found; processing all stocks in raw.")
+        return None
+    try:
+        df = pd.read_csv(path, header=None)
+        tickers = set(df.iloc[:, 0].astype(str).str.strip().str.upper())
+        tickers.discard("")
+        # Skip if first row looks like a header
+        for header in ("SYMBOL", "TICKER", "Symbol", "Ticker"):
+            tickers.discard(header)
+        print(f"[INFO] Loaded {len(tickers)} tickers from {path}")
+        return tickers
+    except Exception as e:
+        print(f"[WARNING] Failed to load {path}: {e}; processing all stocks in raw.")
+        return None
+
+def process_file(csv_path, output_path, df_fear_greed=None):
     df = pd.read_csv(csv_path, parse_dates=["date"])
     df = df.sort_values("date").reset_index(drop=True)
 
@@ -35,13 +60,13 @@ def process_file(csv_path, output_path):
     df["EMA10"] = df["close"].ewm(span=10, adjust=False).mean()
     df["EMA30"] = df["close"].ewm(span=30, adjust=False).mean()
 
-    #Relative strength index (RSI) calculation
+    # Relative strength index (RSI) calculation (avoid div-by-zero when avg_loss is 0)
     delta = df["close"].diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).rolling(window=14).mean()
     avg_loss = pd.Series(loss).rolling(window=14).mean()
-    rs = avg_gain / avg_loss
+    rs = avg_gain / avg_loss.replace(0, np.nan).fillna(1e-10)
     df["RSI"] = 100 - (100 / (1 + rs))
 
     #Moving average convergence divergence (MACD) calculation
@@ -76,11 +101,6 @@ def process_file(csv_path, output_path):
     insider_path = os.path.join(insider_dir, f"{ticker}_insider_trades_daily.csv")
     if os.path.exists(insider_path):
         df_insider = safe_read_insider(insider_path)
-        df_insider = df_insider.rename(columns={
-            "shares": "insider_shares",
-            "amount": "insider_amount",
-            "buy_flag": "insider_buy_flag"
-        })
         df = df.merge(
             df_insider[["date", "insider_shares", "insider_amount", "insider_buy_flag"]],
             on="date", how="left"
@@ -93,7 +113,7 @@ def process_file(csv_path, output_path):
         df["insider_amount"] = 0
         df["insider_buy_flag"] = -1
 
-        # --- Sentiment Data Merge ---
+    # --- Sentiment Data Merge ---
     sentiment_dir = os.path.join(RAW_DIR, "sentiment")
     sentiment_path = os.path.join(sentiment_dir, f"{ticker}_sentiment_daily.csv")
 
@@ -114,13 +134,26 @@ def process_file(csv_path, output_path):
         df["sentiment"] = 0
         df["num_articles"] = 0
 
+    # --- Fear & Greed index (market-wide): merge on date; keep only rows with real values.
+    # Rows with no fear_greed (e.g. before 2011) are left as NA and dropped by dropna() below.
+    if df_fear_greed is not None:
+        df = df.merge(df_fear_greed, on="date", how="left")
+        # do not fill: leave NaN so dropna() later removes those rows
+        from featuresPy.fear_greed_correlation import add_fear_greed_correlation
+        df = add_fear_greed_correlation(df, window_trading_days=126, min_obs=60)
+    else:
+        df["fear_greed"] = 50.0
+
+    # --- If you add VIX/SPY market data: merge on same date only (no shift).
+    #     Using VIX at date T to predict return T->T+1 is OK. Using VIX at T+1 would be leakage.
 
     #Overnight gap
     # Overnight gap % (predicts t+1 move)
     df['overnight_gap'] = (df['open'] - df['close'].shift(1)) / df['close'].shift(1)
-    # Abnormal volume z-score
+    # Abnormal volume z-score (avoid div-by-zero when rolling std is 0)
     rolling_vol = df['volume'].rolling(20)
-    df['abnormal_vol'] = (df['volume'] - rolling_vol.mean()) / rolling_vol.std()
+    vol_std = rolling_vol.std().replace(0, np.nan).fillna(1e-10)
+    df['abnormal_vol'] = (df['volume'] - rolling_vol.mean()) / vol_std
     #Short term realized volatility
     df['volatility_5d'] = df['close'].pct_change().rolling(5).std() * np.sqrt(252)
     df['volatility_20d'] = df['close'].pct_change().rolling(20).std() * np.sqrt(252)
@@ -143,6 +176,25 @@ def process_file(csv_path, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_csv(output_path, index=False)
     print(f"Processed: {output_path}")
+
+def load_fear_greed():
+    """Load market-wide Fear & Greed index; dates normalized to match stock date column."""
+    path = os.path.join(RAW_DIR, "fear_greed.csv")
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=False)
+        df = df.dropna(subset=["date"])
+        df["date"] = df["date"].dt.normalize()
+        df = df.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+        if "fear_greed" not in df.columns:
+            return None
+        return df[["date", "fear_greed"]]
+    except Exception as e:
+        print(f"[WARNING] Failed to load fear_greed.csv: {e}")
+        return None
+
 
 def safe_read_insider(insider_path):
     try:
@@ -181,6 +233,7 @@ def check_missing_today():
     missing = []
 
     for subfolder in ["SPY-VIX", "stocksData"]:
+    #for subfolder in ["stocksData"]:
         processed_subdir = os.path.join(PROCESSED_DIR, subfolder)
         if not os.path.exists(processed_subdir):
             continue
@@ -200,13 +253,22 @@ def check_missing_today():
                 print(f"[ERROR] Failed to check {file_path}: {e}")
 
     if missing:
-        print("❌ The following files are missing today's data:")
+        print("The following files are missing today's data:")
         for filename, last_date in missing:
             print(f" - {filename}: Last date = {last_date}")
     else:
-        print("✅ All files contain today's data.")
+        print("All files contain today's data.")
 
 def main():
+    allowed_tickers = load_allowed_tickers()
+    if allowed_tickers is None:
+        print(f"[ERROR] {STOCK_LIST_PATH} not found or unreadable. Processor only runs for tickers in that file. Exiting.")
+        return
+    df_fear_greed = load_fear_greed()
+    if df_fear_greed is not None:
+        print(f"[INFO] Loaded Fear & Greed index: {len(df_fear_greed)} dates")
+
+    #for subfolder in ["stocksData"]:
     for subfolder in ["SPY-VIX", "stocksData"]:
         raw_subdir = os.path.join(RAW_DIR, subfolder)
         processed_subdir = os.path.join(PROCESSED_DIR, subfolder)
@@ -216,10 +278,14 @@ def main():
             if file.startswith("._"):
                 print(f"[Skipping] macOS metadata: {file}")
                 continue
-            if file.endswith(".csv"):
-                raw_file_path = os.path.join(raw_subdir, file)
-                processed_file_path = os.path.join(processed_subdir, f"{os.path.splitext(file)[0]}_processed.csv")
-                process_file(raw_file_path, processed_file_path)
+            if not file.endswith(".csv"):
+                continue
+            ticker = os.path.splitext(file)[0].split("_")[0]
+            if ticker.upper() not in allowed_tickers:
+                continue
+            raw_file_path = os.path.join(raw_subdir, file)
+            processed_file_path = os.path.join(processed_subdir, f"{os.path.splitext(file)[0]}_processed.csv")
+            process_file(raw_file_path, processed_file_path, df_fear_greed=df_fear_greed)
         
 
 if __name__ == "__main__":
