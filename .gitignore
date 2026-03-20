@@ -3,6 +3,3 @@ forecasts/
 videos/
 sec-edgar-filings/
 config.json
-
-# External: agency-agents (https://github.com/msitarzewski/agency-agents) - not part of this repo
-agency-agents/

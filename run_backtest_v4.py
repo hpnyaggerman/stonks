@@ -19,10 +19,10 @@ os.makedirs(video_dir, exist_ok=True)
 os.makedirs(output_plots_dir, exist_ok=True)
 
 # Config
-initial_value   = 1000.0
-random_runs     = 10
+initial_value   = 5000.0
+random_runs     = 90
 SPIKE_THRESHOLD = 0.80      # Reject stocks with daily abs change > 80%
-MIN_ACCEPTED    = 0.2       # Minimum adjusted probability required
+MIN_ACCEPTED    = 0.1       # Minimum adjusted probability required
 STD_FACTOR      = 0.00       # AdjustedProb = PredProb - STD_FACTOR * StdDev
 
 # Out-of-sample backtest: only dates >= this are used. Strategy is evaluated ONLY on
@@ -296,7 +296,7 @@ for run in range(random_runs):
     value = initial_value
     for i, date in enumerate(common_dates):
         if returns_by_date[date]:
-            pick = random.choice(returns_by_date[date])
+            pick = random.choice(returns_by_date[date]*5)
             value *= np.exp(pick)
         random_results[i, run] = value
 
@@ -329,6 +329,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
     from matplotlib.animation import FuncAnimation, FFMpegWriter
     plt.rcParams["image.cmap"] = "viridis"
     plt.rcParams["savefig.transparent"] = False
@@ -343,6 +344,23 @@ try:
         def force_png_rgb(path):
             pass
 
+    def style_backtest_axes(ax):
+        ax.set_title("AI Probability Strategy vs Random vs SPY", color="white", fontsize=22)
+        ax.set_xlabel("Date", color="white", fontsize=16)
+        ax.set_ylabel("Portfolio Value ($)", color="white", fontsize=16)
+        ax.tick_params(colors="white", labelsize=14)
+        for spine in ax.spines.values():
+            spine.set_color("white")
+        ax.grid(True, color="white", alpha=0.10, linewidth=0.8)
+        locator = mdates.AutoDateLocator(minticks=6, maxticks=10)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+
+    def finalize_backtest_legend(ax):
+        legend = ax.legend(facecolor="black", edgecolor="white", fontsize=14)
+        for text in legend.get_texts():
+            text.set_color("white")
+
     def save_final_plot(
         dates,
         random_results,
@@ -351,22 +369,28 @@ try:
         random_mean=None,
         random_std=None,
         show_uncertainty=False,
+        show_axes=False,
         filename="final_plot.png",
     ):
-        # YouTube 1080p (1920x1080), 16:9
+        # Transparent background, no axis/ticks/labels — lines only
         fig, ax = plt.subplots(figsize=(19.2, 10.8), dpi=100)
-        fig.patch.set_facecolor("black")
-        ax.set_facecolor("black")
+        if show_axes:
+            fig.patch.set_facecolor("black")
+            ax.set_facecolor("black")
+        else:
+            fig.patch.set_facecolor("none")
+            ax.set_facecolor("none")
         for r in range(random_results.shape[1]):
-            ax.plot(dates, random_results[:, r], alpha=0.12, lw=1.5, color="white")
+            label = "Random strategies" if show_axes and r == 0 else "_nolegend_"
+            ax.plot(dates, random_results[:, r], alpha=0.42, lw=1.5, color="white", label=label)
         if show_uncertainty and random_mean is not None:
             ax.fill_between(
                 dates, random_mean - 3 * random_std, random_mean + 3 * random_std,
-                color="gray", alpha=0.08,
+                color="gray", alpha=0.08, label="Random +/-3 std",
             )
             ax.fill_between(
                 dates, random_mean - random_std, random_mean + random_std,
-                color="gray", alpha=0.20,
+                color="gray", alpha=0.20, label="Random +/-1 std",
             )
         ax.plot(dates, spy_values, color="white", lw=4, label="SPY")
         ax.plot(dates, strat_values, color="#39FF14", lw=4, label="Prob Strategy")
@@ -374,16 +398,17 @@ try:
         ymax = 1.2 * max(np.nanmax(spy_values), np.nanmax(strat_values))
         ax.set_ylim(ymin, ymax)
         ax.set_xlim(dates[0], dates[-1])
-        ax.set_title("AI Probability Strategy vs Random vs SPY", color="white", fontsize=22)
-        ax.set_xlabel("Date", color="white", fontsize=16)
-        ax.set_ylabel("Portfolio Value", color="white", fontsize=16)
-        ax.tick_params(colors="white", labelsize=14)
-        legend = ax.legend(facecolor="black", edgecolor="white", fontsize=14)
-        for text in legend.get_texts():
-            text.set_color("white")
+        if show_axes:
+            style_backtest_axes(ax)
+            finalize_backtest_legend(ax)
+        else:
+            ax.set_axis_off()
         png_path = video_dir / filename
-        plt.savefig(png_path, dpi=100, facecolor="black")
-        force_png_rgb(png_path)
+        if show_axes:
+            plt.savefig(png_path, dpi=100, facecolor="black")
+            force_png_rgb(png_path)
+        else:
+            plt.savefig(png_path, dpi=100, facecolor="none", edgecolor="none", transparent=True)
         plt.close(fig)
         print(f"Saved FULL STATIC PNG: {png_path}")
 
@@ -400,6 +425,7 @@ try:
         random_mean=None,
         random_std=None,
         show_uncertainty=False,
+        show_axes=False,
         filename_mp4="evolving_plot.mp4",
         duration_sec=10,
         fps=30,
@@ -414,19 +440,28 @@ try:
         fig.patch.set_facecolor("black")
         ax.set_facecolor("black")
         ax.set_xlim(dates[0], dates[-1])
-        ax.set_title("AI Probability Strategy vs Random vs SPY", color="white", fontsize=22)
-        ax.set_xlabel("Date", color="white", fontsize=16)
-        ax.set_ylabel("Portfolio Value", color="white", fontsize=16)
-        ax.tick_params(colors="white", labelsize=14)
-        lines_random = [ax.plot([], [], alpha=0.12, lw=1.5, color="white")[0] for _ in range(random_results.shape[1])]
+        if show_axes:
+            style_backtest_axes(ax)
+        else:
+            ax.set_axis_off()
+        lines_random = [
+            ax.plot(
+                [],
+                [],
+                alpha=0.12,
+                lw=1.5,
+                color="white",
+                label="Random strategies" if show_axes and i == 0 else "_nolegend_",
+            )[0]
+            for i in range(random_results.shape[1])
+        ]
         line_spy, = ax.plot([], [], color="white", lw=4, label="SPY")
         line_strat, = ax.plot([], [], color="#39FF14", lw=4, label="Prob Strategy")
         line_spy.set_zorder(10)
         line_strat.set_zorder(10)
-        legend = ax.legend(facecolor="black", edgecolor="white", fontsize=14)
-        for text in legend.get_texts():
-            text.set_color("white")
         fill_arts = []  # collect fill_between artists to remove each frame
+        if show_axes:
+            finalize_backtest_legend(ax)
 
         def init():
             for l in lines_random:
@@ -548,8 +583,19 @@ try:
         )
         save_final_plot(
             common_dates, random_results, strategy_history_arr, spy_values_arr,
+            show_uncertainty=False, show_axes=True,
+            filename="random_vs_prob_strategy_clean_with_axes.png",
+        )
+        save_final_plot(
+            common_dates, random_results, strategy_history_arr, spy_values_arr,
             random_mean=random_mean, random_std=random_std, show_uncertainty=True,
             filename="random_vs_prob_strategy_uncertainty.png",
+        )
+        save_final_plot(
+            common_dates, random_results, strategy_history_arr, spy_values_arr,
+            random_mean=random_mean, random_std=random_std,
+            show_uncertainty=True, show_axes=True,
+            filename="random_vs_prob_strategy_uncertainty_with_axes.png",
         )
         # 10-second evolving MP4s; y-axis tracks max of strategy (neon green) line
         save_evolving_mp4(
@@ -559,8 +605,21 @@ try:
         )
         save_evolving_mp4(
             common_dates, random_results, strategy_history_arr, spy_values_arr,
+            show_uncertainty=False, show_axes=True,
+            filename_mp4="random_vs_prob_strategy_clean_with_axes.mp4",
+            duration_sec=10,
+        )
+        save_evolving_mp4(
+            common_dates, random_results, strategy_history_arr, spy_values_arr,
             random_mean=random_mean, random_std=random_std, show_uncertainty=True,
             filename_mp4="random_vs_prob_strategy_uncertainty.mp4",
+            duration_sec=10,
+        )
+        save_evolving_mp4(
+            common_dates, random_results, strategy_history_arr, spy_values_arr,
+            random_mean=random_mean, random_std=random_std,
+            show_uncertainty=True, show_axes=True,
+            filename_mp4="random_vs_prob_strategy_uncertainty_with_axes.mp4",
             duration_sec=10,
         )
         # 2K (2560x1440), 5 seconds
@@ -571,8 +630,21 @@ try:
         )
         save_evolving_mp4(
             common_dates, random_results, strategy_history_arr, spy_values_arr,
+            show_uncertainty=False, show_axes=True,
+            filename_mp4="random_vs_prob_strategy_clean_with_axes_2k_5s.mp4",
+            duration_sec=DURATION_5S, fps=FPS_VIDEO, figsize=(W_2K, H_2K),
+        )
+        save_evolving_mp4(
+            common_dates, random_results, strategy_history_arr, spy_values_arr,
             random_mean=random_mean, random_std=random_std, show_uncertainty=True,
             filename_mp4="random_vs_prob_strategy_uncertainty_2k_5s.mp4",
+            duration_sec=DURATION_5S, fps=FPS_VIDEO, figsize=(W_2K, H_2K),
+        )
+        save_evolving_mp4(
+            common_dates, random_results, strategy_history_arr, spy_values_arr,
+            random_mean=random_mean, random_std=random_std,
+            show_uncertainty=True, show_axes=True,
+            filename_mp4="random_vs_prob_strategy_uncertainty_with_axes_2k_5s.mp4",
             duration_sec=DURATION_5S, fps=FPS_VIDEO, figsize=(W_2K, H_2K),
         )
     else:
