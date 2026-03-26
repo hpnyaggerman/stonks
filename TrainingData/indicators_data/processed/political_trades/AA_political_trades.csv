@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2020-04-13,AA,"<a href=""https://finance.yahoo.com/q?s=AA"" target=""_blank"">AA</a>",AA,Self,Alcoa Corporation,Stock,Sale (Full),"$15,001 - $50,000",--,Kelly Loeffler,https://efdsearch.senate.gov/search/view/ptr/2b47d301-0318-4604-bd14-a0b9c1b8437f/

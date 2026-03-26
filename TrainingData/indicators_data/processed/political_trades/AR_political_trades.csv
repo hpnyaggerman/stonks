@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2015-01-14,AR,"<a href=""https://finance.yahoo.com/q?s=AR"" target=""_blank"">AR</a>",AR,Joint,Antero Resources Corporation (NYSE),Stock,Purchase,"$1,001 - $15,000",--,"David A Perdue , Jr",https://efdsearch.senate.gov/search/view/ptr/112fdda9-70c4-4cc5-a386-5c9491ba2d9b/

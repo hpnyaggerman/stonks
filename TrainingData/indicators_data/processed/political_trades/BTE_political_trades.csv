@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2014-07-23,BTE,"<a href=""https://finance.yahoo.com/q?s=BTE"" target=""_blank"">BTE</a>",BTE,Spouse,Baytex Energy Corp. (NYSE),,Sale (Full),"$1,001 - $15,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/8287dd4c-edca-465c-8008-c792237b3a84/

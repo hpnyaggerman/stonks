@@ -1,0 +1,3 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2018-04-23,BOX,"<a href=""https://finance.yahoo.com/q?s=BOX"" target=""_blank"">BOX</a>",BOX,Self,"Box, Inc.",Stock,Purchase,"$1,001 - $15,000",--,Patrick J Toomey,https://efdsearch.senate.gov/search/view/ptr/4e18c5de-0479-477c-83b9-10fb1de86ac3/
+2018-05-02,BOX,"<a href=""https://finance.yahoo.com/q?s=BOX"" target=""_blank"">BOX</a>",BOX,Self,"Box, Inc.",Stock,Sale (Partial),"$1,001 - $15,000",--,Patrick J Toomey,https://efdsearch.senate.gov/search/view/ptr/589f2589-ca74-4b51-9380-c523f9c7c335/

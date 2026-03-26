@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2014-06-19,AIT,"<a href=""https://finance.yahoo.com/q?s=AIT"" target=""_blank"">AIT</a>",AIT,Spouse,"Applied Industrial Technologies, Inc. (NYSE)",,Sale (Full),"$1,001 - $15,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/97d58777-edb5-4319-b360-74709332d937/

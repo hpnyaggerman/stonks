@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2020-11-20,BRKR,"<a href=""https://finance.yahoo.com/q?s=BRKR"" target=""_blank"">BRKR</a>",BRKR,Spouse,Bruker Corporation,Stock,Purchase,"$1,001 - $15,000",--,Thomas R Carper,https://efdsearch.senate.gov/search/view/ptr/35aec3a8-60a7-4f06-bae3-3b202949e5e5/

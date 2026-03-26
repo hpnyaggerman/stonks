@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2021-01-26,AQN,"<a href=""https://finance.yahoo.com/q?s=AQN"" target=""_blank"">AQN</a>",AQN,Spouse,Algonquin Power &amp; Utilities Corp.,Stock,Purchase,"$1,001 - $15,000",--,Thomas R Carper,https://efdsearch.senate.gov/search/view/ptr/ae5e8414-35c1-44f7-9549-700e9453a96a/

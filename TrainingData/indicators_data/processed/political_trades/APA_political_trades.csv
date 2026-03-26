@@ -1,0 +1,4 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2014-09-04,APA,"<a href=""https://finance.yahoo.com/q?s=APA"" target=""_blank"">APA</a>",APA,Self,Apache Corp. (NYSE),,Sale (Full),"$50,001 - $100,000",--,Sheldon Whitehouse,https://efdsearch.senate.gov/search/view/ptr/e632ec04-6a32-4d25-97b0-31230d48b515/
+2017-03-16,APA,"<a href=""https://finance.yahoo.com/q?s=APA"" target=""_blank"">APA</a>",APA,Spouse,Apache Corporation,Stock,Purchase,"$1,001 - $15,000",--,Patty Murray,https://efdsearch.senate.gov/search/view/ptr/66856e4d-4c3b-45dc-8bab-ba2c28323d5d/
+2017-06-15,APA,"<a href=""https://finance.yahoo.com/q?s=APA"" target=""_blank"">APA</a>",APA,Spouse,Apache Corporation,Stock,Sale (Full),"$1,001 - $15,000",--,Patty Murray,https://efdsearch.senate.gov/search/view/ptr/07a7470c-ae50-4a37-8c10-cf1c59a69674/

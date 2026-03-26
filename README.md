@@ -15,37 +15,40 @@ This project provides an end-to-end workflow:
 - Load and process per-ticker indicator CSVs (`TrainingData/processor.py`, ticker list from `TrainingData/stockList.csv`)
 - Train a **Conv1D + LSTM** model with MC dropout in **`run_forecast_v4.ipynb`**
 - Write forecasts to **`forecasts/`** and split metadata (`split_info.json`, `oos_start_date.txt`) for aligned backtests
-- Run **`run_backtest_v4.py`** to simulate trading on the **test / OOS window only** and export plots to **`videos/`** (and related visuals under **`output_plots/`** from the notebook)
+- Run **`run_backtest_v4.py`** to simulate trading on the **test / OOS window only**, write **`videos/backtest_metrics.json`**, and export PNGs / MP4s to **`videos/`** and **`output_plots/`**
 
-The design emphasizes realistic evaluation (no training dates in the backtest), uncertainty-aware signals, and extension via `TrainingData/featuresPy/`.
+The design emphasizes realistic evaluation (no training dates in the backtest), uncertainty-aware signals, and extension via `TrainingData/featuresPy/`. Optional raw feeds (insider, sentiment, **Congressional / political trades**, Fear & Greed) are merged in **`TrainingData/processor.py`** when the corresponding files exist.
 
 ## Repository layout
 
 ```
 ├── forecasts/                 # *_forecast.csv outputs + split_info.json / oos_start_date.txt
 ├── cache/                     # Cached preprocessed arrays
-├── output_plots/              # Notebook exports (training curves, feature importance, etc.)
-├── videos/                    # Backtest static PNGs and MP4s from run_backtest_v4.py
+├── output_plots/              # Notebook + backtest exports (training curves, feature importance, extra PNGs/MP4s)
+├── videos/                    # Backtest PNGs, MP4s, and backtest_metrics.json from run_backtest_v4.py
 ├── repo_photos/               # Images for this README (commit your PNG here for GitHub)
+├── test_ideas/                # Older v3 experiments (classification notebook + script); primary flow is v4
+├── config.example.json        # Copy to config.json and set ALPHA_VANTAGE_KEY if using downloader.py
 ├── TrainingData/
 │   ├── indicators_data/
-│   │   ├── raw/               # Raw inputs (e.g. fear_greed, prices)
+│   │   ├── raw/               # Raw inputs: prices, fear_greed.csv, insiderBuying/, sentiment/, political_trades/
 │   │   └── processed/
 │   │       ├── SPY-VIX/       # Benchmark series (e.g. SPY for backtest plot)
-│   │       └── stocksData/    # One processed CSV per ticker
-│   ├── featuresPy/            # Extra feature modules (e.g. rolling correlations)
+│   │       ├── political_trades/   # Per-ticker exports from all_ticker_transactions.json (see below)
+│   │       └── stocksData/    # One *_processed.csv per ticker
+│   ├── featuresPy/            # Extra feature modules (e.g. fear_greed_correlation)
 │   ├── stockList.csv          # Tickers processed by processor.py
-│   ├── processor.py           # Main feature pipeline
-│   └── downloader.py          # Optional data download helpers
+│   ├── processor.py           # Main feature pipeline (merges optional raw feeds)
+│   └── downloader.py          # Optional data download helpers (Alpha Vantage)
 ├── run_forecast_v4.ipynb      # Train / forecast pipeline (primary notebook)
-├── run_backtest_v4.py         # OOS backtest + plots / videos
+├── run_backtest_v4.py         # OOS backtest + metrics JSON + plots / videos
 ├── requirements.txt
 └── README.md
 ```
 
 ## Available features (indicators)
 
-`close`, `YesterdayClose`, `YesterdayOpenLogR`, `YesterdayHighLogR`, `YesterdayLowLogR`, `YesterdayVolumeLogR`, `YesterdayCloseLogR`, `MA10`, `MA20`, `MA30`, `DayOfWeek`, `DayOfMonth`, `MonthNumber`, `EMA10`, `EMA30`, `RSI`, `MACD`, `MACD_Signal`, `BollingerUpper`, `BollingerLower`, `Volatility_10`, `Volatility_20`, `Volatility_30`, `OBV`, `ZScore`, insider and sentiment fields, gap/volatility/momentum features, and others merged in `processor.py` (see code for the full set).
+`close`, `YesterdayClose`, `YesterdayOpenLogR`, `YesterdayHighLogR`, `YesterdayLowLogR`, `YesterdayVolumeLogR`, `YesterdayCloseLogR`, `MA10`, `MA20`, `MA30`, `DayOfWeek`, `DayOfMonth`, `MonthNumber`, `EMA10`, `EMA30`, `RSI`, `MACD`, `MACD_Signal`, `BollingerUpper`, `BollingerLower`, `Volatility_10`, `Volatility_20`, `Volatility_30`, `OBV`, `ZScore`, optional **insider** and **sentiment** columns, optional **Fear & Greed** (`fear_greed`) plus rolling **`fear_greed_correlation`** (stock vs index, from `featuresPy/fear_greed_correlation.py` when `raw/fear_greed.csv` is present), optional **daily political-trade aggregates** (`polit_trade_count`, `polit_purchase_count`, `polit_sale_count`, … — see `POLITICAL_MERGED_FEATURE_COLS` in `processor.py`), and gap / volatility / momentum / skew / intraday / sentiment-change fields. See `processor.py` for the authoritative column list.
 
 ## Key features
 
@@ -57,6 +60,8 @@ The design emphasizes realistic evaluation (no training dates in the backtest), 
 | **Walk-forward–style windows** | Rolling windows over processed history |
 | **Batch data generator** | Efficient training from cached tensors |
 | **Confidence threshold** | Configurable probability gate for “buy” signals (e.g. in notebook `CONFIG`) |
+| **Political trades (optional)** | Daily aggregates from Senate disclosure data merged per ticker when raw JSON + exports exist |
+| **Fear & Greed (optional)** | Market index + rolling correlation feature when `raw/fear_greed.csv` is available |
 
 ## Getting started
 
@@ -82,7 +87,17 @@ The backtest reads **`forecasts/split_info.json`** (or `forecasts/oos_start_date
 python run_backtest_v4.py
 ```
 
-Outputs include PNGs and MP4s under **`videos/`** (e.g. `random_vs_prob_strategy_uncertainty.png`).
+**Environment:** `BACKTEST_OOS_START` (optional) overrides the OOS start date; otherwise the script uses `forecasts/split_info.json` or `forecasts/oos_start_date.txt` from the notebook. Without any of these, the script exits so you do not accidentally backtest on training dates.
+
+**Outputs**
+
+- **`videos/backtest_metrics.json`** — Machine-readable OOS summary after each run: `n_trading_days`, `n_dates`, `random_runs`, strategy **`completed_trades`**, **`max_drawdown`**, **`cagr`**, **`final_value`**, random-mean drawdown/CAGR, and **`total_return_over_oos`** (`strategy_fraction`, `random_mean_fraction`, `random_std_fraction`, **`z_score_vs_random`**, **`empirical_percentile_vs_random`). Use it for dashboards, CI, or comparing runs without opening plots.
+- **Equity plots (PNG / MP4)** — Examples: `random_vs_prob_strategy_uncertainty.png` (and `_with_axes`, `_trade_arrows`, `*_clean*` variants), plus 10s and 2K short MP4s (`random_vs_prob_strategy_*.mp4`). Uncertainty bands show ±1σ / ±3σ around the mean of random baseline runs when enabled.
+- **Histogram** — `random_vs_strategy_total_return_hist.png` (in **`videos/`** and **`output_plots/`**): distribution of total OOS return across random runs vs the strategy line.
+- **Confidence vs return** — `confidence_vs_actual_return.png` and `confidence_vs_actual_return.mp4` (adjusted probability at buy vs realized return per trade).
+- **Spike filter** — Tickers whose daily absolute close-to-close change exceeds **`SPIKE_THRESHOLD`** in `run_backtest_v4.py` (default 0.80 = 80%) are skipped as likely splits/data errors.
+
+After you add or change **political-trade** features in processed CSVs, re-run **`run_forecast_v4.ipynb`** so the model trains on the updated columns (see `EXCLUDED_COLS` / feature list in the notebook).
 
 ---
 
@@ -90,7 +105,7 @@ Outputs include PNGs and MP4s under **`videos/`** (e.g. `random_vs_prob_strategy
 
 ### Alpha Vantage API
 
-`TrainingData/downloader.py` can use **Alpha Vantage** for prices. Get a key at [alphavantage.co](https://www.alphavantage.co/support/#api-key), set it in the script, then:
+`TrainingData/downloader.py` runs the fetch scripts under **`TrainingData/featuresPy/`** (e.g. `stockScrapper.py`, `markets.py`, `insiderbuying.py`, `sentiment.py`). Those scripts read **`config.json`** in the **project root** for **`ALPHA_VANTAGE_KEY`**. Copy **`config.example.json`** to **`config.json`**, add your key from [alphavantage.co](https://www.alphavantage.co/support/#api-key), then:
 
 ```bash
 python TrainingData/downloader.py
@@ -101,6 +116,10 @@ python TrainingData/downloader.py
 ```bash
 python TrainingData/processor.py
 ```
+
+**Political trades (optional):** Place **`all_ticker_transactions.json`** under `TrainingData/indicators_data/raw/political_trades/` (list of `{ "ticker", "transactions": [...] }` blocks). On each run, `processor.py` builds per-ticker CSVs under **`processed/political_trades/{TICKER}_political_trades.csv`** (tickers with `/` in the symbol use a safe filename) and merges **daily** aggregates into each stock’s `*_processed.csv`: trade counts by type (purchase/sale/exchange, options/stock/other), distinct senators, and disclosure amount ordinals / log midpoints (`polit_*` columns). If the JSON is missing, political features default to zeros.
+
+**Fear & Greed (optional):** Add **`TrainingData/indicators_data/raw/fear_greed.csv`** with at least `date` and `fear_greed` columns. Without it, the pipeline fills a neutral default for `fear_greed` and skips the correlation helper where not applicable.
 
 ---
 

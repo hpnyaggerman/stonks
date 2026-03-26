@@ -1,0 +1,3 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2017-07-25,BTO,"<a href=""https://finance.yahoo.com/q?s=BTO"" target=""_blank"">BTO</a>",BTO,Spouse,John Hancock Financial Opportunities Fund,Stock,Purchase,"$1,001 - $15,000",--,Sheldon Whitehouse,https://efdsearch.senate.gov/search/view/ptr/57d23801-d886-410f-972c-e6f46209e9c5/
+2018-06-13,BTO,"<a href=""https://finance.yahoo.com/q?s=BTO"" target=""_blank"">BTO</a>",BTO,Joint,John Hancock Financial Opportunities Fund,Stock,Purchase,"$1,001 - $15,000",--,Sheldon Whitehouse,https://efdsearch.senate.gov/search/view/ptr/323d6a47-cb2a-4ff4-8b0b-774a6312a1fa/

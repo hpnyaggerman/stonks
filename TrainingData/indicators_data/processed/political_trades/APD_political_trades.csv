@@ -1,0 +1,3 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2018-04-04,APD,"<a href=""https://finance.yahoo.com/q?s=APD"" target=""_blank"">APD</a>",APD,Spouse,"Air Products and Chemicals, Inc.",Stock,Purchase,"$1,001 - $15,000",--,Shelley M Capito,https://efdsearch.senate.gov/search/view/ptr/b17ecfe5-f246-4f4c-bf2f-4f1dd4c35539/
+2018-04-24,APD,"<a href=""https://finance.yahoo.com/q?s=APD"" target=""_blank"">APD</a>",APD,Spouse,"Air Products and Chemicals, Inc.",Stock,Purchase,"$1,001 - $15,000",--,Shelley M Capito,https://efdsearch.senate.gov/search/view/ptr/b17ecfe5-f246-4f4c-bf2f-4f1dd4c35539/

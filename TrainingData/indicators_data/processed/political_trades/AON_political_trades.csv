@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2018-10-31,AON,"<a href=""https://finance.yahoo.com/q?s=AON"" target=""_blank"">AON</a>",AON,Spouse,Aon plc,Stock,Sale (Partial),"$1,001 - $15,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/cc72eaf0-41e8-4ca1-9439-46e5d7b8a3dc/

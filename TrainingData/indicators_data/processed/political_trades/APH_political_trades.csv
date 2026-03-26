@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2014-11-10,APH,"<a href=""https://finance.yahoo.com/q?s=APH"" target=""_blank"">APH</a>",APH,Spouse,Amphenol Corporation (NYSE),,Purchase,"$15,001 - $50,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/b8079f9b-41e8-4625-bbe3-73f9614af12f/

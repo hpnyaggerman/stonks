@@ -1,0 +1,4 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2014-04-15,AJG,"<a href=""https://finance.yahoo.com/q?s=AJG"" target=""_blank"">AJG</a>",AJG,Spouse,Arthur J Gallagher &amp; Co. (NYSE),,Purchase,"$1,001 - $15,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/07448275-6b41-47f5-a3ce-73c8f316a166/
+2014-06-19,AJG,"<a href=""https://finance.yahoo.com/q?s=AJG"" target=""_blank"">AJG</a>",AJG,Spouse,Arthur J Gallagher &amp; Co. (NYSE),,Sale (Full),"$1,001 - $15,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/97d58777-edb5-4319-b360-74709332d937/
+2014-10-20,AJG,"<a href=""https://finance.yahoo.com/q?s=AJG"" target=""_blank"">AJG</a>",AJG,Self,Arthur J Gallagher &amp; Co. (NYSE),,Purchase,"$100,001 - $250,000",--,John Hoeven,https://efdsearch.senate.gov/search/view/ptr/2bad305c-8d1e-404e-97bd-c6389864832e/

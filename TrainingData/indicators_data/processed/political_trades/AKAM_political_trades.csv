@@ -1,0 +1,3 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2017-05-16,AKAM,"<a href=""https://finance.yahoo.com/q?s=AKAM"" target=""_blank"">AKAM</a>",AKAM,Self,"Akamai Technologies, Inc.",Stock,Sale (Full),"$1,001 - $15,000",--,Sheldon Whitehouse,https://efdsearch.senate.gov/search/view/ptr/b33c92f5-43d9-430a-8c52-7e5c29954e6d/
+2019-08-20,AKAM,"<a href=""https://finance.yahoo.com/q?s=AKAM"" target=""_blank"">AKAM</a>",AKAM,Spouse,"Akamai Technologies, Inc.",Stock,Purchase,"$15,001 - $50,000",--,Susan M Collins,https://efdsearch.senate.gov/search/view/ptr/6784a9a9-d791-451f-816e-e317349aace7/

@@ -1,0 +1,2 @@
+transaction_date,json_block_ticker,ticker_raw,ticker_symbol,owner,asset_description,asset_type,transaction_type,amount,comment,senator,ptr_link
+2020-05-07,BRY,"<a href=""https://finance.yahoo.com/q?s=BRY"" target=""_blank"">BRY</a>",BRY,Spouse,Berry Corporation,Stock,Purchase,"$15,001 - $50,000",--,Ron L Wyden,https://efdsearch.senate.gov/search/view/ptr/1ce2fd56-5a76-4de8-ba9f-a1cf840172be/
