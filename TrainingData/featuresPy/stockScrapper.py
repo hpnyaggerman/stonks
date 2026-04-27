@@ -25,7 +25,7 @@ def download_alpha_vantage_daily(tickers, api_key, save_folder="TrainingData/ind
 
                 # If the latest date is today, no API call needed
                 if pd.to_datetime(last_date).date() >= pd.Timestamp.now().date():
-                    print(f"⏭️ {ticker} is already up to date (latest date: {last_date.date()})")
+                    print(f"{ticker} is already up to date (latest date: {last_date.date()})")
                     should_call_api = False
 
             if should_call_api:
@@ -48,12 +48,12 @@ def download_alpha_vantage_daily(tickers, api_key, save_folder="TrainingData/ind
                         updated_data = pd.concat([existing_data, new_data], ignore_index=True)
                         updated_data.sort_values('date', inplace=True)
                         updated_data.to_csv(filepath, index=False)
-                        print(f"✅ Appended {len(new_data)} new rows to {filepath}")
+                        print(f"Appended {len(new_data)} new rows to {filepath}")
                     else:
-                        print(f"⏭️ {ticker} has no new data (latest date: {last_date.date()})")
+                        print(f"{ticker} has no new data (latest date: {last_date.date()})")
                 else:
                     data.to_csv(filepath, index=False)
-                    print(f"✅ Saved {ticker} data to {filepath}")
+                    print(f"Saved {ticker} data to {filepath}")
 
             # Progress & ETA
             elapsed = time.time() - start_time

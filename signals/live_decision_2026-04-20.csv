@@ -1,0 +1,2 @@
+run_date,date,as_of_close_date,decision,reason,ticker,horizon,adj_prob,pred_prob,pred_std
+2026-04-20,2026-04-20,2026-02-06,BUY,Best adjusted probability above threshold 0.2,BNY,1d,0.24886725842952728,0.24886725842952728,0.04963183030486107

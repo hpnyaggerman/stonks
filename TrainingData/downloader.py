@@ -1,20 +1,21 @@
 """
-The purpose of this script is to download the stock and market data
+The purpose of this script is to download stock and market data
 for training the model.
 """
 
 import subprocess
+import sys
 
-#Run the stockScrapper.py script to download stock data for:
-#Close, Open, High, Low, Volume
-subprocess.run(["python", "TrainingData/featuresPy/stockScrapper.py"])
+PYTHON = sys.executable
 
+# Run stock data downloader: close/open/high/low/volume.
+subprocess.run([PYTHON, "TrainingData/featuresPy/stockScrapper.py"], check=True)
 
-#Run the markets.py script to download market data for SPY and VIX
-subprocess.run(["python", "TrainingData/featuresPy/markets.py"])
+# Run market data downloader for SPY/VIX.
+subprocess.run([PYTHON, "TrainingData/featuresPy/markets.py"], check=True)
 
-#Run the insiderbuying.py script to download insider buying data
-subprocess.run(["python", "TrainingData/featuresPy/insiderbuying.py"])
+# Run insider buying downloader.
+subprocess.run([PYTHON, "TrainingData/featuresPy/insiderbuying.py"], check=True)
 
-#Run the insiderbuying.py script to download insider buying data
-subprocess.run(["python", "TrainingData/featuresPy/sentiment.py"])
+# Run sentiment downloader.
+subprocess.run([PYTHON, "TrainingData/featuresPy/sentiment.py"], check=True)
