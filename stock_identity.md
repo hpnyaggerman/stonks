@@ -1,190 +1,199 @@
-# Stock Identity Encoder
+# Stock Identity — Inductive Self-Supervised Relational Embedding
 
-Learns an **inductive, time-stable, relational** embedding per stock per date. The embedding is a function of price dynamics only — no ticker IDs, no per-ticker parameters — so unseen stocks embed for free. Training forces the same stock's embedding to persist across time windows *and* across random peer draws; the surviving invariant is the stock's persistent position relative to the market. That invariant is the "value."
+## 1. Purpose
 
-Downstream use: replace arbitrary per-ticker embeddings/enums in the predictor with this content-derived vector. Adding stocks then requires no architecture change.
+Train one encoder that, at inference, takes a **set** of ticker candle-windows and emits per ticker an **identity vector** `z_i ∈ ℝ^D` with these properties:
 
-## Target properties → mechanism
-
-| Property | Mechanism |
+| Property | Meaning |
 |---|---|
-| Inductive (new stock, zero new params) | embedding = `f(candles, peers)`; weights shared across all stocks |
-| Identity-free | no ticker ID input; per-window normalization removes absolute price level |
-| Time-stable | positive pair = same stock, two different windows → InfoNCE pulls them together |
-| Relational | per-stock query is contextualized by cross-attention over its group (real peers) |
-| Non-collapsing | InfoNCE negatives + VICReg variance/covariance terms |
-| Causal (no leakage) | causal Mamba; window uses rows ≤ t; peers contemporaneous; train-period-only fit |
-| Grounded, not shortcut | member dropout + per-step regrouping defeat closed-set elimination |
+| distinct-in-set | `z_i` separable from other tickers' vectors in the same set |
+| label-free | no external/target label anywhere in training |
+| temporally consistent | same ticker → near-equal `z_i` across different time windows |
+| relational | `z_i` derives from this ticker's relations to others in the set |
+| inductive | encoder generalizes to tickers never seen in training |
+| unique | competitors stay separated even when same-sector tickers cluster near |
 
-## Architecture
+Downstream consumer: a cross-stock situation-reporter module that attends over `{z_i}` as per-ticker identity tokens.
 
-```mermaid
-flowchart TD
-    U["Train-period universe<br/>all stocks x all dates"]
-    U --> G["Sample one group<br/>K distinct stocks"]
-    G --> WA["Anchor windows<br/>each stock, window ending t_a"]
-    G --> WP["Positive windows<br/>same stocks, window ending t_b != t_a"]
+## 2. Method
 
-    WA --> NA["Normalize per window<br/>log-returns + z-score<br/>out: x_a (K, L, F)"]
-    NA --> MA["CandleEncoder  [shared weights, dropout ON]<br/>Causal Mamba x3, then mean-pool over time L<br/>x_a (K, L, F) -> q_a (K, d)"]
-    MA --> RA["RelationalContext  [shared weights, dropout ON]<br/>attention ACROSS the K stocks + member dropout<br/>h = Linear(q + attn(q))<br/>q_a (K, d) -> h_a (K, D)"]
-    RA --> ZA["L2 normalize<br/>z_a = h_a / norm(h_a)   (K, D)"]
+**VICReg-style non-contrastive self-supervised learning over sets, with temporal positives.**
+VICReg = Variance-Invariance-Covariance Regularization: prevents representation collapse with explicit variance + covariance penalties instead of negative samples. "Over sets" = the encoder is permutation-equivariant across the ticker axis (reordering the input tickers reorders the outputs identically; a ticker's output does not depend on its position). "Temporal positives" = the two views of a ticker being pulled together are two different **time windows**, not two augmentations of one image.
 
-    WP --> NP["Normalize per window<br/>log-returns + z-score<br/>out: x_p (K, L, F)"]
-    NP --> MP["CandleEncoder  [shared weights, dropout ON]<br/>Causal Mamba x3, then mean-pool over time L<br/>x_p (K, L, F) -> q_p (K, d)"]
-    MP --> RP["RelationalContext  [shared weights, dropout ON]<br/>attention ACROSS the K stocks + member dropout<br/>h = Linear(q + attn(q))<br/>q_p (K, d) -> h_p (K, D)"]
-    RP --> ZP["L2 normalize<br/>z_p = h_p / norm(h_p)   (K, D)"]
+Contrastive (InfoNCE) was the alternative; rejected here because it needs many negatives + a temperature and makes the elimination shortcut (§8) more tempting. Non-contrastive preserves every invariant and removes those two knobs.
 
-    ZA --> NCE["InfoNCE  (symmetric, temperature tau)<br/>S = z_a . z_p^T / tau    (K, K)<br/>positive = diagonal: same stock, other window<br/>negatives = off-diagonal: the other K-1 stocks<br/>loss = 0.5 * (CE(S) + CE(S^T))"]
-    ZP --> NCE
-    RA --> VC["VICReg on h  (anti-collapse)<br/>var = mean relu(1 - std_per_dim)<br/>cov = sum off-diagonal(cov(h))^2"]
-    RP --> VC
-    NCE --> L["Total loss<br/>L = InfoNCE + lv*var + lc*cov"]
-    VC --> L
-```
+## 3. Notation
 
-Both branches are the same network with one shared set of weights (Siamese); they differ only in which window of each stock they consume. `K`=group size, `L`=window length, `F`=feature count, `d`=encoder width, `D`=embedding width.
-
-## Blocks
-
-| Block | In → Out | Notes |
-|---|---|---|
-| `WindowNormalizer` | `(K,L,F_raw)` → `(K,L,F)` | deterministic; log-returns + per-window z-score; drops absolute price level |
-| `CandleEncoder` | `(K,L,F)` → `(K,d)` | causal Mamba ×3 → masked mean-pool; shared, Siamese; dropout ON |
-| `RelationalContext` | `(K,d)` → `(K,D)` | set cross-attention over the group + residual + linear head; permutation-invariant; member-key dropout; dropout ON |
-| L2 normalize | `(K,D)` → `(K,D)` | only for the InfoNCE space (`z`); VICReg terms read pre-norm `h` |
-
-`d` = encoder hidden width. `D` = embedding width. `K` = group size. `L` = window length. `F` = stationary, per-window-normalized features (returns, ranges, volume z-score, scaled indicators); absolute price/level excluded.
-
-## Forward + loss
-
-```python
-class CandleEncoder(nn.Module):                # shared across stocks and both views
-    def forward(self, x):                      # x: (K, L, F)
-        h = self.mamba_stack(x)                # (K, L, d), causal
-        return masked_mean(h, dim=1)           # (K, d)
-
-class RelationalContext(nn.Module):            # operates on the whole group at once
-    def forward(self, q):                      # q: (K, d)
-        mask = member_dropout_mask(q.size(0))  # randomly drop peer keys each pass
-        a = self.attn(q, q, q, key_padding_mask=mask)   # (K, d), perm-invariant
-        return self.head(q + a)                # (K, D) = h
-
-def objective(h_a, h_p, tau, lv, lc):
-    z_a, z_p = F.normalize(h_a, dim=-1), F.normalize(h_p, dim=-1)
-    S = (z_a @ z_p.T) / tau                     # (K, K)
-    labels = torch.arange(S.size(0))
-    info = 0.5 * (ce(S, labels) + ce(S.T, labels))   # symmetric InfoNCE
-    var  = vic_variance(h_a)   + vic_variance(h_p)    # hinge: relu(1 - std)
-    cov  = vic_covariance(h_a) + vic_covariance(h_p)  # off-diagonal cov squared
-    return info + lv * var + lc * cov
-```
-
-```python
-# VICReg terms (operate on pre-normalization h, batch dim = K)
-def vic_variance(h, eps=1e-4):
-    std = torch.sqrt(h.var(dim=0) + eps)        # (D,)
-    return torch.relu(1.0 - std).mean()
-
-def vic_covariance(h):
-    h = h - h.mean(dim=0, keepdim=True)
-    cov = (h.T @ h) / (h.size(0) - 1)           # (D, D)
-    off = cov - torch.diag(torch.diag(cov))
-    return off.pow(2).sum() / h.size(1)
-```
-
-One term, three jobs: **InfoNCE** does discrimination (the closed-set "classify within group"), temporal consistency (positive = same stock, other window), and collapse resistance (negatives = the other K−1 stocks). **var/cov** are the seatbelt if negatives go weak.
-
-## Training step
-
-```python
-for step in range(num_steps):
-    group       = sample_distinct_stocks(K)           # regroup EVERY step
-    x_a, x_p    = sample_two_windows(group)           # causal, train-period only
-    q_a, q_p    = enc(norm(x_a)), enc(norm(x_p))      # shared weights
-    h_a, h_p    = rel(q_a), rel(q_p)                  # shared, group-wise
-    loss        = objective(h_a, h_p, tau, lv, lc)
-    loss.backward(); opt.step(); opt.zero_grad()
-```
-
-- **Distinct stocks per group** → no false negatives in the InfoNCE denominator.
-- **Regroup every step** → the closed set is non-stationary; values learned by elimination in one group are wrong in the next; only grounded values survive.
-- Optional: bound or weight `|t_a − t_b|` so near windows count more (respects nonstationarity).
-
-## Anti-shortcut defenses
-
-| Shortcut | Defense |
+| Symbol | Meaning |
 |---|---|
-| Closed-set elimination (place K−1 → K-th is free) within a step | member-key dropout in `RelationalContext` |
-| Same elimination exploited across steps | per-step regrouping (set composition changes) |
-| Absolute price level as near-constant identity | per-window normalization (returns + z-score) |
-| Representation collapse to a constant | InfoNCE negatives + VICReg variance term |
-| Dimension redundancy | VICReg covariance term |
+| `T` | window length (trading days) |
+| `F` | input features per day (§4; F=2 core, 5 with candle geometry) |
+| `N` | tickers in a scope (variable) |
+| `G` | random group size, sampled per step |
+| `K` | windows sampled per training step (`K ≥ 2`) |
+| `H` | temporal-encoder hidden width |
+| `D` | identity-vector dim (deployed) |
+| `D'` | expander width (train-only), `D' > D` |
+| `z_i^{(k)}` | identity of ticker `i` computed in window `k` |
+| `z̄_i` | mean of `z_i^{(k)}` over the `K` windows in a step |
+| `e_i` | `Expander(z̄_i) ∈ ℝ^{D'}` |
+| `λ_c,λ_s,λ_v,λ_w` | loss weights (consistency, scope, variance, covariance) |
+| `γ` | target per-dim std in the variance floor (≈ 1) |
+| `sg(·)` | stop-gradient (treated as constant in backprop) |
+| scope | a set encoded together: a random **group** (size `G`) or the window **universe** (all present tickers) |
 
-Dropout is triple-duty: stochastic view generation, MC uncertainty at inference, and the within-step anti-elimination force above.
+## 4. Input representation (Fork A)
 
-## Inference / deploy / add-stocks
+Per ticker per day, from raw OHLCV `(O,H,L,C,V)`:
 
-```mermaid
-flowchart TD
-    IN["Query: (stock, date)<br/>stock may be unseen"]
-    IN --> W["Causal window for the stock<br/>rows <= date<br/>(1, L, F)"]
-    PEERS["Sample peers at date<br/>other stocks, rows <= date<br/>(K-1, L, F)"]
-    W --> STK["Form group of K, normalize<br/>(K, L, F)"]
-    PEERS --> STK
-    STK --> FWD["CandleEncoder + RelationalContext<br/>dropout ON, run R times (resample peers each draw)<br/>-> R embeddings (R, D)"]
-    FWD --> MEAN["mean over R draws<br/>-> embedding (D,)"]
-    FWD --> STD["std over R draws<br/>-> uncertainty (D,)"]
-```
-
-```python
-@torch.no_grad()
-def embed(stock, date, R=25):
-    w = causal_window(stock, date)                       # rows <= date
-    draws = [rel(enc(norm(stack(w, peer_sample(date)))))[0]   # dropout ON
-             for _ in range(R)]
-    z = torch.stack(draws)
-    return z.mean(0), z.std(0)                            # value, uncertainty
-```
-
-New ticker → run it; zero new params (zero-shot). Averaging `R` draws marginalizes both dropout noise and peer-draw noise. On distribution shift, fine-tune the encoder ("post-train").
-
-## Hyperparameters
-
-| Symbol | Value | Meaning |
-|---|---|---|
-| `L` | 61 | window length (window_size+1 convention) |
-| `F` | ~20–41 | normalized feature count |
-| `d` | 128 | encoder hidden width |
-| Mamba blocks | 3 | `d_state=16`, `d_conv=4` |
-| `D` | 64 | embedding width |
-| `K` | 32–64 | group size (negatives = K−1) |
-| `R` | 25 | inference draws |
-| `tau` | 0.1 | InfoNCE temperature |
-| `lv`, `lc` | 1.0, 0.04 | variance / covariance weights |
-
-## Repo integration (new Stage 2.5, file-contract-chained)
-
-| Contract file | Writer | Reader | Must agree on |
+| # | Channel | Formula | Note |
 |---|---|---|---|
-| `embeddings/{TICKER}_embed.csv` | Stage 2.5 (this) | predictor merge step | columns `Date, emb_0 … emb_{D-1}`; causal (`Date` row uses data ≤ Date); `D` |
+| 1 | close log-return | `log(C_t / C_{t-1})` | core |
+| 2 | volume log-change | `log(V_t / V_{t-1})` | core; level-free volume |
+| 3 | open geometry | `log(O_t / C_t)` | optional candle shape |
+| 4 | high geometry | `log(H_t / C_t)` | optional candle shape |
+| 5 | low geometry | `log(L_t / C_t)` | optional candle shape |
 
-- Reads `TrainingData/.../processed/stocksData/{TICKER}_daily_processed.csv`.
-- Predictor left-merges `emb_*` on `date`. Feature list is negatively defined → `emb_*` become features automatically. **Do not** add them to `EXCLUDED_COLS`. Requires one predictor retrain.
-- PyTorch stage; decoupled from the TF stages purely by the CSV contract.
+Then divide each channel `c` by **one global constant** `s_c` = std of channel `c` over all tickers' training rows (one scalar per channel, **not** per-ticker, no per-ticker centering).
 
-## Ablation (settle empirically)
+Rationale (terse):
+- Absolute price/volume **level** is stable per ticker but a trivial lookup → would make consistency free and defeat inductivity → removed by differencing.
+- Global (not per-ticker) scaling fixes optimization scale **without** erasing volatility: a 2×-volatility ticker stays 2× after scaling, so volatility-magnitude survives as an identity signal.
+- The 40+ engineered indicators are deliberately excluded — they pre-bake structure and bloat input. Optional add-on: append per-window realized volatility as a scalar side-feature; default off (raw log-returns already carry it).
 
-Fixed data, split, loss. Vary one axis at a time:
+## 5. Architecture
 
-1. **solo** (`z = head(q)`, drop `RelationalContext`) vs **peer-context** — tests whether relation-in-encoder beats relation-in-loss-only.
-2. **regroup on/off**, **member-dropout on/off** — tests the anti-elimination claims.
+```mermaid
+flowchart TD
+  X["Candle window x_i ∈ ℝ^(T×F)<br/>F: close log-ret, Δlog-vol, (opt) O/H/L-vs-close geometry"]
+  TE["TemporalEnc (shared θ)<br/>2-layer Transformer encoder, no causal mask<br/>maps (T,F) → h_i ∈ ℝ^H, per ticker, own series only"]
+  SA["SetAttn (shared φ)<br/>self-attention over the ticker axis, NO positional encoding<br/>permutation-equivariant, MC-dropout kept active (training=True always)<br/>maps set of h_j (j in scope) → set of z_i ∈ ℝ^D"]
+  Z["Identity vector z_i ∈ ℝ^D  — DEPLOYED artifact"]
+  EX["Expander (MLP, train-only)<br/>maps z̄_i → e_i ∈ ℝ^D' with D' > D"]
+  LV["L_v + L_w : variance floor + decorrelation (between-ticker spread)"]
+  LC["L_c : cross-window consistency"]
+  LS["L_s : group vs universe scope invariance"]
+  X --> TE --> SA --> Z
+  Z --> EX --> LV
+  Z --> LC
+  Z --> LS
+```
 
-Metrics: OOS within-stock vs across-stock cosine separation; embedding stability across time; downstream predictor lift with `emb_*` as features.
+- **TemporalEnc**: 2-layer Transformer encoder. At `T=60`, Mamba's long-sequence advantage is moot and adds CUDA/triton install friction — use it only if `T` grows past ~500. SetAttn is the load-bearing relational part; spend complexity there.
+- **SetAttn**: standard self-attention with **no positional encoding** on the set axis → permutation-equivariant and size-agnostic by construction; this is what makes scope-invariance (§6, `L_s`) attainable. At `N ≈ 348` full `O(N²)` attention is cheap; switch to Set-Transformer induced points (ISAB) only if `N` grows large.
+- **MC dropout** = dropout left active at inference; here active in every pass so SetAttn cannot exactly pin down which neighbors are present.
+- **Expander**: VICReg trick — apply variance/covariance terms in a wider space, deploy the narrower backbone `z`. Optional: drop it and compute `L_v,L_w` directly on `z` (one-line simplification).
 
-## Open risks
+## 6. Losses
 
-- Existence of a persistent cross-window invariant is the core hypothesis; weak persistence starves both solo and peer-context variants.
-- Stacked attention + InfoNCE + consistency can be optimization-unstable; watch for collapse despite VICReg (monitor per-dim std).
-- Peer-draw variance at inference; mitigated by `R` draws, but cost scales with `R`.
-- `mamba-ssm` requires CUDA kernels; fallback encoder = causal Conv1D + LSTM in PyTorch.
+All gradients flow through the encoder; **no labels** enter anywhere.
+
+- **Consistency** (temporal + neighbor invariance), on deployed `z`:
+  `L_c = mean_i [ (1/K) · Σ_k ‖ z_i^{(k)} − z̄_i ‖² ]`
+  Same ticker across `K` windows, each with a different random group → `z_i` must be invariant to both time slice and neighbor composition.
+
+- **Scope invariance** (set-size invariance), on deployed `z`:
+  `L_s = mean_{i,k} ‖ z_i^{(k),group} − sg( z_i^{(k),universe} ) ‖²`
+  `z^{group}` from a size-`G` random group; `z^{universe}` from all tickers present in window `k`; `sg` makes the universe pass a fixed target. Ties small-set and full-market embeddings → inductive / size-agnostic.
+
+- **Variance floor** (anti-collapse), on expander `e`, per dimension `d`:
+  `L_v = mean_d max(0, γ − std_i(e_{i,d}))`
+  `std_i` over the batch of per-ticker `e_i`. Forces each dimension to carry spread → no collapse to a point.
+
+- **Covariance / decorrelation** (full-rank use), on expander `e`:
+  `L_w = (1/D') · Σ_{d≠d'} [ Cov_i(e) ]²_{d,d'}`
+  Pushes off-diagonal covariance to zero → embedding uses its full capacity → sharper uniqueness.
+
+Total: `L = λ_c·L_c + λ_s·L_s + λ_v·L_v + λ_w·L_w`.
+
+`L_v` and `L_w` operate on **per-ticker means** `z̄_i` → they are literally the between-ticker variance/covariance (anti-collapse), kept orthogonal to `L_c` (within-ticker, across-window).
+
+Property → enforcing mechanism:
+
+| Property | Enforced by |
+|---|---|
+| distinct-in-set | `L_v`, `L_w`, SetAttn |
+| label-free | scheme has no labels |
+| temporally consistent | `L_c` |
+| relational | SetAttn (architecture) |
+| inductive | shared weights + `L_s` + held-out-ticker eval |
+| unique | `L_v` + `L_w` |
+
+Starting weights (VICReg-derived, tune): `λ_c=25, λ_s=10, λ_v=25, λ_w=1`. Defaults: `T=60, H=128, D=128, D'=512, K=2–4, G~U[8,64], γ=1`.
+
+## 7. Training step
+
+```mermaid
+flowchart TD
+  S["Sample K windows spread ACROSS history (not adjacent), K≥2"]
+  E["Eligible E = tickers present in ALL K windows"]
+  GS["Sample group size G (e.g. uniform on [8,64])"]
+  P["Per window k: random-partition E into disjoint groups of ~G"]
+  GE["Encode each group: TemporalEnc then SetAttn → z_i^(k,group)"]
+  UE["Encode full universe of window k → z_i^(k,universe)  (stop-grad target)"]
+  AGG["z̄_i = mean over k of z_i^(k,group)"]
+  L["L = λc·Lc + λs·Ls + λv·Lv + λw·Lw   →   backprop, optimizer step"]
+  S --> E --> GS --> P --> GE --> AGG --> L
+  P --> UE --> L
+```
+
+```python
+def step():
+    W = sample_K_windows_spread_across_history()       # K >= 2
+    E = tickers_present_in_all(W)                       # eligible set
+    G = sample_group_size()                             # e.g. U[8, 64]
+    zg = {}                                             # zg[k][i] group embedding
+    zu = {}                                             # zu[k][i] universe embedding
+    for k, w in enumerate(W):
+        for grp in random_partition(E, size=G):         # re-partition each window
+            h = TemporalEnc(features(w, grp))           # (|grp|, T, F) -> (|grp|, H)
+            zg[k].update(zip(grp, SetAttn(h)))          # -> (|grp|, D), MC-dropout on
+        hu = TemporalEnc(features(w, present(w)))       # full universe of window w
+        zu[k] = read_off(SetAttn(hu), E)
+    zbar = {i: mean_k(zg[k][i]) for i in E}
+    Lc = mean_i(var_k(zg[k][i]))
+    Ls = mean_ki(sqdist(zg[k][i], stop_grad(zu[k][i])))
+    e  = Expander(stack([zbar[i] for i in E]))          # -> (|E|, D')
+    Lv = mean_d(relu(gamma - std_batch(e[:, d])))
+    Lw = offdiag_sq_mean(cov_batch(e))
+    (lam_c*Lc + lam_s*Ls + lam_v*Lv + lam_w*Lw).backward()
+    opt.step()
+```
+
+Sampling rules that matter:
+- **Windows spread across history**, not adjacent. Adjacent windows share near-identical price content → consistency becomes trivial and teaches nothing; spread windows force identity to survive regime change.
+- **Variable `G` + re-partition every window** is the primary anti-elimination pressure (§8), stronger than MC dropout.
+- **Eligible = present in all `K` windows** so the cross-window variance `L_c` is computable for every batch member.
+
+## 8. Why it does not degenerate
+
+| Degenerate solution | Guard |
+|---|---|
+| full collapse (all `z` equal) | `L_v` per-dim std floor |
+| dimensional collapse (spread in 1–2 dims) | `L_w` decorrelation |
+| trivial consistency via price/volume level | level-free inputs (§4) |
+| elimination shortcut ("I'm the odd one out in this group") | re-partition each window + variable `G` + `L_c` across different neighbor sets; MC dropout secondary |
+| scope shortcut (ignore the set → `L_s` trivially satisfied → non-relational) | **not** loss-blocked; detect via relationality-ablation probe (§9); lever = lower `λ_s` / widen `G` |
+
+Note on `L_s` ↔ relational tension: a market-structural relation (e.g. a ticker's loading on the market factor) is estimable from any representative subset, so it is *already* scope-invariant — `L_s` therefore **selects** structural relations over specific-neighbor ones, which is what a stable ID wants. The only failure mode is the model abandoning relations entirely; that is observable, not assumed (§9).
+
+## 9. Evaluation probes
+
+| Probe | Measures | Pass condition |
+|---|---|---|
+| discriminability ratio = between-ticker var / within-ticker across-window var | core health | `> 1` and rising |
+| same ratio on **held-out tickers + held-out time** | inductivity | comparable to train tickers |
+| scope drift: embed `i` in sets of size `{4,16,64,all}` | size-invariance | small drift of `z_i` |
+| relationality ablation: `z_i` in-context vs `i`-alone | actually relational | moves, and consistently per ticker |
+| effective rank (participation ratio of `cov(z)`) | full-rank use | `≈ D` |
+| sector kNN purity vs known peers (eval-only labels) | close-but-distinct | high purity, non-zero pairwise distance |
+
+## 10. Caveats
+
+- **Rotation identifiability.** Variance/covariance losses are invariant to orthogonal transforms → the embedding is defined only up to an isometry. Two separately-trained encoders produce **non-comparable** vectors. Train once, **freeze**, reuse.
+- **Causal windows downstream.** When `z_i` feeds a predictor at time `t`, build its window from candles `≤ t` only — no lookahead leak. SSL **training** windows may sit anywhere in history.
+- **Freeze for the consumer.** The cross-stock reporter consumes frozen `z` as fixed per-ticker identity tokens; do not co-train it against a moving encoder unless intentionally fine-tuning end-to-end.
+
+## 11. Downstream hook
+
+Inference: feed any-size set of causal candle-windows → `{z_i}`. The reporter attends over `{z_i}` (identity tokens) plus the current window to produce cross-stock situation features for the target ticker. Set size is unconstrained by construction (SetAttn + `L_s`).
