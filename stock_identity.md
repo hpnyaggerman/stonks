@@ -20,48 +20,30 @@ Downstream use: replace arbitrary per-ticker embeddings/enums in the predictor w
 
 ```mermaid
 flowchart TD
-    U["Train-period universe (stocks x dates)"]
-    U --> G["Sample random group: K distinct stocks"]
-    G --> WA["Anchor windows — end t_a"]
-    G --> WP["Positive windows — end t_b (same K stocks)"]
+    U["Train-period universe<br/>all stocks x all dates"]
+    U --> G["Sample one group<br/>K distinct stocks"]
+    G --> WA["Anchor windows<br/>each stock, window ending t_a"]
+    G --> WP["Positive windows<br/>same stocks, window ending t_b != t_a"]
 
-    WA --> NORM["Per-window normalize: log-returns + z-score"]
-    WP --> NORM
-    NORM --> XA["x_a : (K, L, F)"]
-    NORM --> XP["x_p : (K, L, F)"]
+    WA --> NA["Normalize per window<br/>log-returns + z-score<br/>out: x_a (K, L, F)"]
+    NA --> MA["CandleEncoder  [shared weights, dropout ON]<br/>Causal Mamba x3, then mean-pool over time L<br/>x_a (K, L, F) -> q_a (K, d)"]
+    MA --> RA["RelationalContext  [shared weights, dropout ON]<br/>attention ACROSS the K stocks + member dropout<br/>h = Linear(q + attn(q))<br/>q_a (K, d) -> h_a (K, D)"]
+    RA --> ZA["L2 normalize<br/>z_a = h_a / norm(h_a)   (K, D)"]
 
-    subgraph ENC["CandleEncoder (shared / Siamese; MC dropout ON)"]
-      direction TB
-      MB["Causal Mamba x3 (d=128, d_state=16, d_conv=4)"]
-      MB --> PL["Masked mean-pool over L"]
-    end
-    XA --> ENC
-    XP --> ENC
-    ENC --> QA["q_a : (K, d)"]
-    ENC --> QP["q_p : (K, d)"]
+    WP --> NP["Normalize per window<br/>log-returns + z-score<br/>out: x_p (K, L, F)"]
+    NP --> MP["CandleEncoder  [shared weights, dropout ON]<br/>Causal Mamba x3, then mean-pool over time L<br/>x_p (K, L, F) -> q_p (K, d)"]
+    MP --> RP["RelationalContext  [shared weights, dropout ON]<br/>attention ACROSS the K stocks + member dropout<br/>h = Linear(q + attn(q))<br/>q_p (K, d) -> h_p (K, D)"]
+    RP --> ZP["L2 normalize<br/>z_p = h_p / norm(h_p)   (K, D)"]
 
-    subgraph REL["RelationalContext (shared; permutation-invariant; MC dropout ON)"]
-      direction TB
-      AT["Multi-head set cross-attention<br/>query=q, keys/values=group set<br/>member-key dropout"]
-      AT --> RS["Residual: q + attn(q)"]
-      RS --> HD["Linear head"]
-    end
-    QA --> REL
-    QP --> REL
-    REL --> HA["h_a : (K, D)"]
-    REL --> HP["h_p : (K, D)"]
-
-    HA --> ZA["z_a = L2norm(h_a)"]
-    HP --> ZP["z_p = L2norm(h_p)"]
-
-    ZA --> NCE["InfoNCE(z_a, z_p) — symmetric, temp tau<br/>diag = positive, off-diag = negatives"]
+    ZA --> NCE["InfoNCE  (symmetric, temperature tau)<br/>S = z_a . z_p^T / tau    (K, K)<br/>positive = diagonal: same stock, other window<br/>negatives = off-diagonal: the other K-1 stocks<br/>loss = 0.5 * (CE(S) + CE(S^T))"]
     ZP --> NCE
-    HA --> VC["variance hinge + covariance penalty (on h)"]
-    HP --> VC
-
-    NCE --> OBJ["L = InfoNCE + lv*var + lc*cov"]
-    VC --> OBJ
+    RA --> VC["VICReg on h  (anti-collapse)<br/>var = mean relu(1 - std_per_dim)<br/>cov = sum off-diagonal(cov(h))^2"]
+    RP --> VC
+    NCE --> L["Total loss<br/>L = InfoNCE + lv*var + lc*cov"]
+    VC --> L
 ```
+
+Both branches are the same network with one shared set of weights (Siamese); they differ only in which window of each stock they consume. `K`=group size, `L`=window length, `F`=feature count, `d`=encoder width, `D`=embedding width.
 
 ## Blocks
 
@@ -144,12 +126,15 @@ Dropout is triple-duty: stochastic view generation, MC uncertainty at inference,
 ## Inference / deploy / add-stocks
 
 ```mermaid
-flowchart LR
-    IN["(stock, date) — may be unseen ticker"] --> WIN["Causal window, rows <= date"]
-    POP["Population sample @ date (peers, <= date)"] --> FWD["forward x R<br/>dropout ON, peer resample"]
-    WIN --> FWD
-    FWD --> M["mean -> embedding (D,)"]
-    FWD --> S["std -> uncertainty (D,)"]
+flowchart TD
+    IN["Query: (stock, date)<br/>stock may be unseen"]
+    IN --> W["Causal window for the stock<br/>rows <= date<br/>(1, L, F)"]
+    PEERS["Sample peers at date<br/>other stocks, rows <= date<br/>(K-1, L, F)"]
+    W --> STK["Form group of K, normalize<br/>(K, L, F)"]
+    PEERS --> STK
+    STK --> FWD["CandleEncoder + RelationalContext<br/>dropout ON, run R times (resample peers each draw)<br/>-> R embeddings (R, D)"]
+    FWD --> MEAN["mean over R draws<br/>-> embedding (D,)"]
+    FWD --> STD["std over R draws<br/>-> uncertainty (D,)"]
 ```
 
 ```python
