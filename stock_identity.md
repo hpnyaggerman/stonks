@@ -29,15 +29,16 @@ Contrastive (InfoNCE) was the alternative; rejected here because it needs many n
 | `T` | window length (trading days) |
 | `F` | input features per day (§4; F=2 core, 5 with candle geometry) |
 | `U` | the window universe — all eligible tickers present that window (`|U| ≈ 348`) |
-| `N` | number of groups `U` is partitioned into; group size ≈ `|U|/N`. **Low N = fewer, bigger groups = more peers; N=1 = the full set (deploy config).** Sampled over `1 ≤ N ≤ |U|/g_min` ∝ inverse-variance (§7) |
+| `N` | number of groups `U` is partitioned into; group size ≈ `|U|/N`. **Low N = fewer, bigger groups = more peers; N=1 = the full set (deploy config).** **Enumerated** over `1 ≤ N ≤ |U|/g_min` every step (§7) |
 | `g_min` | min group size (peers per group), ≈ 8 — caps `N` so every group carries relational signal (no singletons) |
-| `V(N)` | expected within-N consistency variance (finite-population correction): `∝ (N−1)/(|U|−1) + v₀`; `v₀` = full-set non-sampling-noise floor; fit from §9 probe |
+| `V(N)` | expected within-N consistency variance (finite-population correction): `∝ (N−1)/(|U|−1) + v₀`; `v₀` = full-set non-sampling-noise floor; fit from §9 probe. Sets the **within-N precision weight `w(N) = (1/V(N)) / Σ_{N'} 1/V(N')`** (§6), shared across `L_c`/`L_v`/`L_w` |
+| `w(N)` | normalized within-N precision weight `(1/V(N)) / Σ_{N'} 1/V(N')`; heaviest at `N=1` (`V(1)=v₀` smallest). Combines the within-N losses across the enumerated `N`; `L_x` (cross-N) does **not** use it |
 | `K` | windows sampled per training step (`K ≥ 2`) |
 | `H` | temporal-encoder hidden width |
-| `D` | identity-vector dim (deployed) |
+| `D` | identity-vector dim (deployed), **`D=32`**. Kept small so `|U| ≫ D`: `L_w` and the §9 effective-rank probe estimate a `D×D` covariance from `|U|` ticker-samples, which goes rank-deficient / noise-inflated when `D ≈ |U|`. Treat as the *measured* effective rank, not a default — raise if §9 shows it pegged (§6 `L_w` note) |
 | `z_i^{(N,k)}` | identity of ticker `i` in window `k` under an `N`-group partition |
-| `m_i^{(N)}` | per-N mean: mean of `z_i^{(N,·)}` over windows/draws at partition count `N` (EMA-tracked) |
-| `z̄_i` | pooled per-ticker identity: mean of `z_i` over `N` × windows |
+| `m_i^{(N)}` | per-N mean: mean of `z_i^{(N,k)}` over the `K` windows at partition count `N` — **carries gradient in-step**; EMA across steps only de-noises (never a stop-grad target). The within-N losses `L_c`/`L_v`/`L_w` act on these |
+| `z̄_i` | pooled per-ticker identity: within-N-weighted mean `Σ_N w(N)·m_i^{(N)}` — diagnostic only, **no longer a loss target** (losses act per-N). Deploy uses the `N=1` mean `m_i^{(1)}` specifically (§12) |
 | `ID_i` | deployed static identity: mean over windows of the full-set pass (§12) |
 | `λ_c,λ_x,λ_v,λ_w,λ_r` | loss weights (per-N consistency, cross-N invariance, variance, covariance, gated relational synergy §6) |
 | `γ` | target per-dim std in the variance floor (≈ 1) |
@@ -70,9 +71,9 @@ flowchart TD
   TE["TemporalEnc (shared θ)<br/>2-layer Transformer encoder, no causal mask<br/>maps (T,F) → h_i ∈ ℝ^H, per ticker, own series only"]
   SA["SetAttn (shared φ)<br/>self-attention over the ticker axis, NO positional encoding<br/>permutation-equivariant; dropout in TRAINING only, inference deterministic<br/>maps one group (size |U|/N) of h_j → its z_i ∈ ℝ^D"]
   Z["Identity vector z_i^(N,k) ∈ ℝ^D  — DEPLOYED as the full-set pass"]
-  LC["L_c : per-N consistency across windows — within-N precision, more=better"]
-  LX["L_x : cross-N invariance on per-N means m_i(N) — identity size-stable"]
-  LV["L_v + L_w : variance floor + decorrelation on pooled means z̄_i — between-ticker spread, all N"]
+  LC["L_c : per-N consistency across windows — within-N, 1/V(N)-weighted, more=better"]
+  LX["L_x : cross-N invariance on per-N means m_i(N) — uniform over N, size-stable"]
+  LV["L_v + L_w : floor + decorrelation per-N on means m_i(N), 1/V(N)-weighted — N=1 heaviest"]
   X --> TE --> SA --> Z
   Z --> LC
   Z --> LX
@@ -85,31 +86,34 @@ flowchart TD
 
 ## 6. Losses
 
-All gradients flow through the encoder; **no labels** enter anywhere. Each training step samples a few `N` (number of groups; low N = bigger groups = more peers, §7); the loss compounds per-N terms with two cross-N terms.
+All gradients flow through the encoder; **no labels** enter anywhere. Each training step **enumerates every `N`** (number of groups; low N = bigger groups = more peers, §7); the loss combines three **within-N** terms (`L_c`/`L_v`/`L_w`, weighted across `N` by `w(N)=1/V(N)`, heaviest at `N=1`) with one **cross-N** term (`L_x`, uniform over `N`).
 
-- **Per-N consistency** (temporal + neighbor invariance), on `z`, **flat weight over the sampled `N`** (big-group emphasis lives in how `N` is *sampled*, §7 — not a multiplier):
-  `L_c = mean_{N ∈ sampled} mean_i [ (1/K) · Σ_k ‖ z_i^{(N,k)} − m_i^{(N)} ‖² ]`
-  Variance of ticker `i` across the `K` windows at partition count `N`, then a plain mean over the sampled `N`. Drives **within-N precision**; "more = better" emerges because larger groups (lower `N`) genuinely lower this variance — toward `0` at `N=1` (the full set). Random re-partition each window → invariance to neighbor composition (`N=1` has no partition choice → trains the deploy config's pure cross-window consistency). A steep per-`N` multiplier is **not** used: under per-step normalization it collapses onto whichever low-`N` is drawn and starves the rest, breaking `L_x` and the slope.
+- **Per-N consistency** (temporal + neighbor invariance), on `z`, a **within-N** metric → combined across the enumerated `N` by **precision weight `w(N) = (1/V(N)) / Σ_{N'} 1/V(N')`** (normalized inverse-variance; `N=1` heaviest):
+  `L_c = Σ_N w(N) · mean_i [ (1/K) · Σ_k ‖ z_i^{(N,k)} − m_i^{(N)} ‖² ]`
+  Variance of ticker `i` across the `K` windows at partition count `N`, merged across `N` by precision. Drives **within-N precision**; "more = better" emerges because larger groups (lower `N`) genuinely lower this variance — toward `0` at `N=1` (the full set). Random re-partition each window → invariance to neighbor composition (`N=1` has no partition choice → trains the deploy config's pure cross-window consistency). The emphasis is now an **explicit deterministic `w(N)`, not a sampling frequency** (§7 enumerates every `N`): the old worry that a steep per-`N` multiplier "collapses onto whichever low-`N` is drawn" was an artifact of *sampling* — with every `N` present each step there is no draw to collapse onto, so the GLS-optimal `1/V(N)` emphasis applies directly.
 
-- **Cross-N invariance** (size-invariance), on the **per-N means** `m_i^{(N)}`:
-  `L_x = mean_i Var_N( m_i^{(N)} )`
-  Pulls a ticker's identity together across group sizes → the ID does not depend on how many peers it was scored with. Computed **on the means, not raw draws**: raw-draw tying would also equalize small- vs big-group *precision* and flatten "more = better"; mean-tying penalizes only genuine size-drift. EMA-track `m_i^{(N)}` across steps for a cheap de-noised target.
+- **Cross-N invariance** (size-invariance), on the **per-N means** `m_i^{(N)}`, the lone **cross-N** metric → **uniform over all enumerated `N` (no precision weight — the only free pass)**:
+  `L_x = mean_i Var_N( m_i^{(N)} )`   (uniform over `N`)
+  Pulls a ticker's identity together across group sizes → the ID does not depend on how many peers it was scored with. **Must stay uniform**: precision-weighting a cross-`N` *difference* would down-weight large `N` and stop measuring drift exactly at the small-group end — the regime furthest from the `N=1` deploy limit — silently un-enforcing size-invariance where it is needed most. Computed **on the means, not raw draws**: raw-draw tying would also equalize small- vs big-group *precision* and flatten "more = better"; mean-tying penalizes only genuine size-drift. `m_i^{(N)}` carries gradient in-step; EMA across steps only de-noises — **not** a stop-grad target (a fully detached `m` makes `Var_N(m)` gradient-free and `L_x` a no-op).
 
-- **Variance floor** (anti-collapse), on the pooled means `z̄_i`, per dimension `d`:
-  `L_v = mean_d max(0, γ − √( Var_i(z̄_{i,d}) + ε ))`  (`ε ≈ 1e-4`)
-  The `ε` is the VICReg numerical guard — without it the gradient `∝ 1/√Var` diverges as a dimension collapses, exactly when the floor must push outward (and at init, where per-dim variance is tiny). Variance over the batch of pooled per-ticker means (de-noised over N × windows). Forces each dimension to carry between-ticker spread → no collapse; "no ticker like another at any N" holds in the mean (what deployment consumes). On means, not the raw pool, so within-ticker noise cannot pad the floor.
+- **Variance floor** (anti-collapse), a **within-N** metric on the **per-N means** `m_i^{(N)}`, per dimension `d`, combined by `w(N)`:
+  `L_v = Σ_N w(N) · mean_d max(0, γ − √( Var_i(m_{i,d}^{(N)}) + ε ))`  (`ε ≈ 1e-4`)
+  Per `N`, the between-ticker variance of the (window-de-noised) per-N means; merged across `N` by precision so **`N=1` (the deployed config) is floored most heavily and directly** — its spread no longer depends on `L_x` dragging it into line with an all-`N` pool. The `ε` is the VICReg numerical guard — without it the gradient `∝ 1/√Var` diverges as a dimension collapses, exactly when the floor must push outward (and at init, where per-dim variance is tiny). On the **means** (not raw windows) so within-ticker noise cannot pad the floor — `m_i^{(N)}` averages over the `K` windows and the EMA de-noises further; **per-`N`** (not the all-`N` pool `z̄`) so the deployed slice is constrained where it ships. "No ticker like another at any `N`" now holds at each `N` directly, `N=1` most.
 
-- **Covariance / decorrelation** (full-rank use), on the pooled means `z̄_i`:
-  `L_w = (1/D) · Σ_{d≠d'} [ Cov_i(z̄) ]²_{d,d'}`
-  Off-diagonal covariance → 0 → embedding uses its full capacity → sharper uniqueness.
+- **Covariance / decorrelation** (full-rank use), a **within-N** metric on the per-N means `m_i^{(N)}`, combined by `w(N)`:
+  `L_w = Σ_N w(N) · (1/D) · Σ_{d≠d'} [ Cov_i(m^{(N)}) ]²_{d,d'}`
+  Off-diagonal covariance → 0 → embedding uses its full capacity → sharper uniqueness. Per-`N` and `w(N)`-weighted for the same reason as `L_v`: the deployed `N=1` config is decorrelated directly, not transitively through `L_x`. **Small-sample caveat:** `Cov_i` is a `D×D` matrix estimated from `|U|` ticker-rows, so it is rank-deficient / noise-floored when `D ≈ |U|` — the off-diagonal floor of a *truly* decorrelated embedding is `≈ (D−1)/|U|`, and the same noise inflates the §9 effective-rank probe (so it can't detect dimensional collapse). The chosen **`D=32`** keeps `|U| ≫ D` (`|U|≈118` on the smallest deep-anchored steps, ~350 on recent ones → floor `≈ 0.26` / `0.09`, vs `≈1.08` at `D=128`), so this is mild and the probe stays honest. If the deep-step floor still bites, accumulate `Cov_i` over a multi-step pseudo-batch (`n_eff ≫ D`) — a contingency, not a default (don't add it preemptively).
 
-- **Relational synergy** `L_r` (**gated** — on only if the §9 attention-concentration probe reads narrow; off by default). Forces peers to be *used* without dictating *which* relation. Three masked passes of SetAttn through the **same shared encoder** give ticker `i` three embeddings: `z_i^self` (`i` attends to itself only → own-series), `z_i^grp` (`i` attends to peers only → relational), `z_i^both` (normal — the deployed config). With a quality score `acc = −Var_k(z_i)` (consistency; higher = more consistent) and margin `m`:
-  `L_r = mean_i [ relu( acc(z_i^self) − acc(z_i^both) + m ) + relu( acc(z_i^grp) − acc(z_i^both) + m ) ]`
-  `acc(both) ≥ acc(self) + m` forces peers to add value → relational; `acc(both) ≥ acc(grp) + m` forces own-series to add value → keeps volatility-as-identity. Neither source is droppable; **synergy is forced, not merely floored** — the margin `m` is what makes it a force (without it `both ≈ self` ties and the own-series shortcut survives). Cost: 3× SetAttn passes; deployed config is `both`. Target-agnostic by design (uses the model's own consistency, not a chosen relation like correlation) — fits "any relation that works".
+- **Relational synergy** `L_r` (**gated** — on only if the §9 attention-concentration probe reads narrow; off by default). Forces peers to be *used* without dictating *which* relation. Three masked passes of SetAttn through the **same shared encoder** give ticker `i` three embeddings: `z_i^self` (`i` attends to itself only → own-series), `z_i^grp` (`i` attends to peers only → relational), `z_i^both` (normal — the deployed config). Quality is the across-window **precision** `p(z) = 1 / (Var_k(z) + ε)` (inverse variance over the `K` windows; higher = more consistent; `ε` the same guard as `L_v`). One **superadditivity** check, stop-gradient on the two reference passes:
+  `L_r = mean_i relu( p(sg(z_i^self)) + p(sg(z_i^grp)) − p(z_i^both) )`
+  Precisions **add under independent fusion** (two independent estimators of one identity combine to precision `p₁+p₂`), so `p(both) ≥ p(self) + p(grp)` demands the both-pass beat *independent fusion of the parts* — genuinely emergent, non-additive synergy, with "sum of parts" a **principled bar, not an arbitrary margin**. It blocks **both** shortcuts deductively: the own-series shortcut gives `p(both)=p(self)` ⟹ needs `p(grp) ≤ 0` (impossible, `p>0`); the peers-only shortcut gives `p(both)=p(grp)` ⟹ needs `p(self) ≤ 0` (impossible). The **stop-gradient `sg(·)`** on the parts removes the perverse path: without it the check is met by *degrading* `z^self`/`z^grp` (cheap — nothing else pins their precision, since `L_c`/`L_v`/`L_w` act only on the `both` pass) instead of *improving* `z^both`; with it the only gradient route is to raise `p(both)`, and clearing `p(self)+p(grp)` is unreachable without genuinely using the peers. No margin `m` — equality *is* the independent-fusion floor, any excess is emergence. Cost: 3× SetAttn passes; deployed config is `both`. Target-agnostic by design (uses the model's own consistency, not a chosen relation like correlation) — fits "any relation that works".
+  *Caveats:* (i) `1/Var` over only `K=2–4` windows is spiky — compute `Var_k` on the EMA-de-noised per-N means (or over more windows) and clamp `p` to `[0, 1/ε]`. (ii) `p` is capped at `1/ε`, so when both parts are individually very consistent the bar `p(self)+p(grp)` can exceed any reachable `p(both)`; `L_r` then stays positive and merely pushes `p(both)` toward max consistency (aligned with `L_c`) — so read health off the logged `p(self)`/`p(grp)`/`p(both)`, not off `L_r=0`.
+
+**Within-N vs cross-N — the one weighting rule.** Three of the four core terms are **within-N** (measured at a fixed group-count: consistency `L_c`, between-ticker spread `L_v`, decorrelation `L_w`). By the size-invariance premise each estimates *the same* quantity at `N`-dependent precision, so each is combined across `N` by inverse-variance `w(N)=1/V(N)` (heaviest at `N=1`, the deploy config). `L_x` is the only **cross-N** term — it measures *drift across* `N` — so it alone takes a uniform free pass; weighting it would un-measure the very drift it exists to catch (and re-introduce the small-group blind spot). `V(N)` was derived as the *consistency* precision (§3); reused as the shared within-N weight it is an approximation — the precision *profile* (more peers → tighter per-N means → more honest spread/decorrelation estimate) is shared in shape across the three within-N terms, though the exact constant may differ per term.
 
 Total: `L = λ_c·L_c + λ_x·L_x + λ_v·L_v + λ_w·L_w`  (`+ λ_r·L_r` when gated on).
 
-All terms act in `z`-space — `L_v`/`L_w` on the pooled means `z̄_i`, `L_c`/`L_x` on the per-window / per-N embeddings. The floor sits in the same space the consistency/invariance pulls would shrink: a global contraction that cheapens `L_c`/`L_x` immediately violates `std_i(z̄_{i,d}) ≥ γ`, so the floor anchors the embedding scale.
+All terms act in `z`-space — `L_v`/`L_w` on the per-N means `m_i^{(N)}`, `L_c` on the per-window embeddings `z_i^{(N,k)}`, `L_x` on the per-N means across `N`. The floor sits in the same space the consistency/invariance pulls would shrink: a global contraction that cheapens `L_c`/`L_x` immediately violates `std_i(m_{i,d}^{(N)}) ≥ γ` at every `N` (heaviest at `N=1`), so the floor anchors the embedding scale at the deployed config directly.
 
 Property → enforcing mechanism:
 
@@ -122,48 +126,52 @@ Property → enforcing mechanism:
 | inductive / size-invariant | shared weights + `L_x` + held-out-ticker eval |
 | unique | `L_v` + `L_w` |
 
-Starting weights (tune): `λ_c=25, λ_x=10, λ_v=25, λ_w=1` (gated relational: `λ_r≈1`, margin `m` = a small consistency gap). Defaults: `T=60, H=128, D=128, K=2–4, γ=1`, `g_min≈8`. Per step: pin `N=1`, draw a few more `N ∈ [1,|U|/g_min]` from `P(N) ∝ 1/V(N)` (inverse-variance / precision weighting); `V(N) ∝ (N−1)/(|U|−1) + v₀` (finite-population correction — `|U|` baked in, `0` sampling-noise at `N=1`), `v₀` fit from the §9 more=better probe.
+Starting weights (tune): `λ_c=25, λ_x=10, λ_v=25, λ_w=1` (gated relational: `λ_r≈1`, no margin — the bar is the parts' summed precision). Defaults: `T=60, H=128, D=32, K=2–4, γ=1`, `g_min≈8` (`D=32 ≪ |U|` keeps the `L_w` covariance / §9 effective-rank well-conditioned — see §6 `L_w` note; `H` stays 128, it is independent of `D`). Per step: **enumerate every `N ∈ [1, |U|/g_min]`** (`N=1` included by construction); combine within-N terms (`L_c`/`L_v`/`L_w`) by `w(N)=(1/V(N))/Σ_{N'}1/V(N')`, keep `L_x` uniform over `N`; `V(N) ∝ (N−1)/(|U|−1) + v₀` (finite-population correction — `|U|` baked in, `0` sampling-noise at `N=1`), `v₀` fit from the §9 more=better probe. Enumeration is cheap: TemporalEnc is `N`-independent (encode each ticker once per window, reuse for all `N`); only SetAttn repeats, summing to `≈ ln(|U|/g_min)·|U|²` — a few× one full-set pass — and the per-`N` groups batch into one block-diagonal-masked SetAttn call.
 
 ## 7. Training step
 
 ```mermaid
 flowchart TD
-  S["Sample K windows spread ACROSS history (not adjacent), K≥2"]
-  E["Eligible universe U = tickers present in ALL K windows"]
-  NS["Sample N: pin N=1, draw more ∝ 1/V(N) over [1, |U|/g_min]"]
+  S["Pick anchor ticker a; sample K windows spaced ACROSS a's OWN history (not adjacent), K≥2"]
+  E["Eligible universe U = tickers present in ALL K windows  (a ∈ U by construction)"]
+  NS["Enumerate all N over [1, |U|/g_min]  (N=1 included by construction)"]
   P["Per window k, per N: random-partition U into N groups (size ~|U|/N)"]
-  GE["Encode each group: TemporalEnc then SetAttn → z_i^(N,k)"]
-  AGG["m_i(N) = mean over k (EMA across steps);  z̄_i = mean over N×k"]
-  L["L = λc·Lc(flat mean over N) + λx·Lx + λv·Lv + λw·Lw   →   step"]
+  GE["TemporalEnc once per ticker per window (N-independent, cached); SetAttn per group (block-diagonal batch) → z_i^(N,k)"]
+  AGG["m_i(N) = mean over k windows (grad in-step; EMA de-noises);  w(N) = 1/V(N)"]
+  L["L = λc·Lc + λv·Lv + λw·Lw  (within-N, 1/V(N)-weighted) + λx·Lx  (cross-N, uniform)   →   step"]
   S --> E --> NS --> P --> GE --> AGG --> L
 ```
 
 ```python
 def step():
-    W = sample_K_windows_spread_across_history()        # K >= 2
-    U = tickers_present_in_all(W)                        # eligible universe
+    a = sample_anchor_ticker()                           # uniform (or weighted toward under-covered tickers)
+    W = sample_K_windows_spread_within_history(a)        # K >= 2, spaced as wide as a's OWN history allows
+    U = tickers_present_in_all(W)                        # present-in-all-K (predicate UNCHANGED); a in U by construction
+    h = {k: {i: TemporalEnc(features(win, i)) for i in U}   # N-INDEPENDENT: encode each ticker
+         for k, win in enumerate(W)}                        #   once per window, reuse for every N
     z = nested_dict()                                    # z[N][k][i]
-    for N in sample_Ns(U):                               # pin N=1 + a few ~ P(N)∝1/V(N), over [1, |U|//g_min]
-        for k, w in enumerate(W):
+    for N in range(1, len(U)//g_min + 1):                # ENUMERATE all N every step (N = 1 .. |U|/g_min)
+        for k in range(len(W)):
             for grp in random_partition(U, n_groups=N):  # re-partition each window
-                h = TemporalEnc(features(w, grp))        # (|grp|, T, F) -> (|grp|, H)
-                z[N][k].update(zip(grp, SetAttn(h)))     # group size ~ |U|/N; dropout on
-    m    = {N: {i: mean_k(z[N][k][i]) for i in U} for N in z}   # per-N means (EMA-de-noise across steps)
-    zbar = {i: mean_N(m[N][i] for N in z) for i in U}           # pooled per-ticker identity
-    M    = stack([zbar[i] for i in U])                          # (|U|, D)
-    Lc = mean_N(mean_i(var_k(z[N][k][i])) for N in z)          # flat mean over sampled N
-    Lx = mean_i(var_N(m[N][i] for N in z))                      # cross-N invariance, on per-N means
-    Lv = mean_d(relu(gamma - sqrt(var_batch(M[:, d]) + eps)))   # floor on pooled means; eps guards 1/sqrt(var)
-    Lw = offdiag_sq_sum(cov_batch(M)) / D                       # 1/D normalization (matches §6)
+                z[N][k].update(zip(grp, SetAttn([h[k][i] for i in grp])))  # block-diagonal batchable; dropout on
+    m  = {N: {i: mean_k(z[N][k][i]) for i in U} for N in z}   # per-N means over K windows (carry grad; EMA de-noise across steps)
+    wN = {N: 1.0/V(N) for N in z};  Z = sum(wN.values())     # within-N precision weights, N=1 heaviest
+    Mn = lambda N: stack([m[N][i] for i in U])               # (|U|, D) matrix of per-N means
+    # within-N terms: weighted by wN[N]/Z  (N=1 heaviest = the deploy config)
+    Lc = sum(wN[N]*mean_i(var_k(z[N][k][i])) for N in z) / Z
+    Lv = sum(wN[N]*mean_d(relu(gamma - sqrt(var_batch(Mn(N)[:, d]) + eps))) for N in z) / Z
+    Lw = sum(wN[N]*offdiag_sq_sum(cov_batch(Mn(N)))/D for N in z) / Z
+    # cross-N term: UNIFORM over N (the lone free pass) — full-range coverage
+    Lx = mean_i(var_N(m[N][i] for N in z))
     (lam_c*Lc + lam_x*Lx + lam_v*Lv + lam_w*Lw).backward()
     opt.step()
 ```
 
-Sampling rules that matter:
-- **Windows spread across history**, not adjacent. Adjacent windows share near-identical price content → consistency becomes trivial; spread windows force identity to survive regime change.
-- **Sample `N`, re-partition every window.** Pin `N=1` (full set = deploy config) and draw a few more `N` from `P(N) ∝ 1/V(N)` over `[1, |U|/g_min]` (need ≥2 distinct `N` for `Var_N`; cap at group size `g_min` — singleton groups carry no relational signal). Don't enumerate all `N` per step (`~|U|` encodes — wasteful); the range is covered over steps. Random partitions at `N>1` are the anti-elimination pressure; `N=1` has no partition choice.
-- **Emphasis = sampling, not a weight.** `P(N) ∝ 1/V(N)` is inverse-variance (precision) weighting — the GLS-optimal way to combine estimators of differing precision — with `V(N) ∝ (N−1)/(|U|−1) + v₀` the finite-population-corrected within-N variance (`|U|` baked in; `0` sampling-noise at `N=1`, floored by `v₀`). Per-step weights stay flat — a steep multiplier would collapse onto the drawn low-`N`. Fit `V(N)` from the §9 more=better probe; expect extra steepening toward `N=1` if relational structure dominates (Marchenko–Pastur).
-- **Eligible `U` = present in all `K` windows** so the per-N cross-window variance `L_c` is computable for every ticker.
+Step rules that matter:
+- **Ticker-anchored windows, spread as wide as the anchor's history allows; not adjacent.** Each step picks an anchor ticker `a` (uniform, or weighted toward under-covered tickers) and draws the `K` windows spaced across **`a`'s own** history. Adjacent windows share near-identical content → trivial consistency; spread windows force identity to survive regime change — but the spread is **feasibility-relative** (a 2011 survivor → decade-wide spread; a 2024 IPO → ~2-year spread), not a fixed calendar gap. This is what **guarantees coverage**: every ticker with ≥2 spaceable windows is anchored with positive probability, so it appears in training. A fixed *global* far-spread window set would instead intersect (e.g.) a 2012 window with a 2024 one and leave only ~118/348 long-lived survivors — excluding the ~230 mostly-2021+-IPO names, who would then be out-of-distribution at deploy yet **not** flagged (`σ_i` measures within-ticker resolution, not distance from the training regime).
+- **Enumerate `N`, re-partition every window.** Compute every `N ∈ [1, |U|/g_min]` each step (`N=1` = full set = deploy config, included by construction; cap at group size `g_min` — singleton groups carry no relational signal). Random partitions at `N>1` are the anti-elimination pressure; `N=1` has no partition choice. Enumeration is cheap because the dominant cost, TemporalEnc, is `N`-independent and computed once per ticker per window; only the cheap SetAttn repeats (harmonic sum `≈ ln(|U|/g_min)·|U|²`, batchable into one block-diagonal-masked SetAttn call). The old "sample a few `N`, cover the range over steps" scheme was a cost dodge that mis-assumed a per-`N` re-encode; it also coupled coverage to emphasis and starved `L_x` at large `N` — enumeration removes both.
+- **Emphasis = explicit per-loss-class weight, not sampling frequency.** Within-N terms (`L_c`/`L_v`/`L_w`) combine across `N` by `w(N)=(1/V(N))/Σ_{N'}1/V(N')` — inverse-variance / GLS-optimal merging of same-quantity estimators of differing precision, heaviest at `N=1`. The cross-N term `L_x` stays **uniform** (weighting a cross-`N` difference un-measures size-drift at large `N`). Because every `N` is computed every step these are deterministic weights, so the old "steep multiplier collapses onto the drawn low-`N`" failure (a sampling artifact) cannot arise. `V(N) ∝ (N−1)/(|U|−1) + v₀` (finite-population-corrected; `|U|` baked in, `0` sampling-noise at `N=1`, floored by `v₀`), fit from the §9 more=better probe; expect extra steepening toward `N=1` if relational structure dominates (Marchenko–Pastur).
+- **Eligible `U` = present in all `K` windows** (predicate **unchanged**) so the per-N cross-window variance `L_c` is computable for every ticker; the anchor `a ∈ U` by construction. Tickers with <2 spaceable windows genuinely have no cross-window pair → they cannot enter `L_c` and stay **deploy-flag-only** (§12, `σ_i` undefined), correctly left out of training rather than forced in.
 
 ## 8. Why it does not degenerate
 
@@ -182,15 +190,15 @@ Two narrow failures, two guards: *memorize specific peers* is killed by `L_x` (s
 
 | Probe | Measures | Pass condition |
 |---|---|---|
-| discriminability ratio = between-ticker var / within-ticker across-window var | core health | `> 1` and rising |
-| same ratio on **held-out tickers + held-out time** | inductivity | comparable to train tickers |
+| discriminability ratio = between-ticker var / within-ticker across-window var, **plus the absolute between-ticker spread** (mean pairwise `‖z̄_i − z̄_j‖`, **eval-mode / dropout-off**) | core health (the eval-mode spread also catches the dropout train/eval gap) | ratio `> 1` **and** absolute spread holds at the floor `γ`. **Not "rising"**: `L_c` drives the denominator → 0, so a climbing ratio is near-automatic and the scale-invariant ratio can mask an *eroding* numerator — watch the numerator / absolute spread, not the climb |
+| same ratio on **held-out tickers + held-out time**, **stratified by history length (include a short-history / recent-IPO slice)** | inductivity — incl. the young-ticker regime, not just survivors | comparable **across history-length buckets**, not only on long-history tickers |
 | cross-N drift: `m_i(N)` across partition counts `N` | size-invariance (`L_x`) | small mean-drift |
 | more=better slope: within-N variance vs group size | peers actually help | variance falls as groups grow |
 | attention concentration / peer-swap sensitivity | actually relational (not own-series, not memorized) | attention spread over many peers; `z_i` tracks peer *structure*, stable to peer *identity* |
-| effective rank (participation ratio of `cov(z̄)`) | full-rank use | `≈ D` |
+| effective rank (participation ratio of `cov(z̄)`) — trustworthy now that `D=32 ≪ |U|` | full-rank use **+ validates `D`** | high (`≈ D`); but if **pegged at `D` while discriminability is only adequate**, `D` is capping identity → raise it. Confirm capacity with a `D=32` vs `D=64` A/B (if 64 uses >32 effective dims *and* separates better, 32 was too tight) |
 | sector kNN purity vs known peers (eval-only labels) | close-but-distinct | high purity, non-zero pairwise distance |
 
-The attention-concentration row **gates `L_r`** (§6): a narrow reading (attention on few peers, `z_i` insensitive to peer swaps) turns the relational-synergy term on; otherwise leave it off. The more=better row **fits `V(N)`** (§7): its within-N-variance-vs-group-size curve yields `v₀` and any curvature, which set the `N`-sampling `P(N) ∝ 1/V(N)`.
+The attention-concentration row **gates `L_r`** (§6): a narrow reading (attention on few peers, `z_i` insensitive to peer swaps) turns the relational-synergy term on; otherwise leave it off. The more=better row **fits `V(N)`** (§7): its within-N-variance-vs-group-size curve yields `v₀` and any curvature, which set the within-N loss weights `w(N) ∝ 1/V(N)` (§6).
 
 ## 10. Caveats
 
@@ -214,10 +222,12 @@ Procedure:
 
 Do **not** report a `σ/√(#windows)` standard error: the per-window samples are not iid (overlapping windows, drifting present-set), so a calibrated SE would overstate confidence — `σ_i` is the honest resolution signal.
 
-Train/deploy scope match: deployment scores the full set (`N=1`); training sweeps `N ≥ 2`. `L_x` makes the identity size-invariant, so `N=1` is the in-distribution large-group limit, not a special pass — no universe branch, no covering, no small-group inference. Residual: fidelity of the `N=1` extrapolation scales with `λ_x`; if it drifts, raise `λ_x` or extend the swept counts toward `N=1` (the full set) during training.
+Train/deploy scope match: deployment scores the full set (`N=1`); training **enumerates `N=1` every step** alongside all larger `N`, and the within-N losses weight `N=1` heaviest (`w(1)` largest, since `V(1)=v₀` is smallest). So the deployed config's consistency, spread, and decorrelation are trained **directly at `N=1`**, not reached by extrapolation — `L_x` additionally ties `N=1` to larger-group scopes for size-invariance, but is no longer the sole guarantor of the deploy slice's quality. No universe branch, no covering, no small-group inference. Residual: if cross-`N` drift is still visible at deploy (§9 probe, stratified by group size), raise `λ_x`.
 
 Point-in-time discipline: a full-history `ID_i` has seen data after any past date, and stationary-by-intent does **not** make it causal — lookahead features can still hide in the estimate (it is a function of the averaged windows, post-date ones included). So full-history IDs are for **non-decision use only** (offline clustering, viz).
 
 **Integration contract (deferred — not wired now):** when `ID_i` feeds the main prediction model, it is built from a window set with **no candles after that model's as-of point** — bounded by the model's *training* cutoff while training, by the *inference* date while scoring. One frozen ID-set per cutoff, reused across the period (not per day); applies to every path into the prediction model, the situation reporter included.
+
+**Encoder-fitting scope — accepted by design; NOT a leak to flag.** The contract above bounds the *input windows* (`≤ as-of`), **not** the encoder weights `θ`/`φ` or the channel scalers `s_c`, which are fit **once on all history** and frozen (§10). This is **intentional and accepted**, for one reason: this encoder's deliverable is **information encoding, not prediction**. Its validity is established **intrinsically** — training loss plus the §9 held-out-**ticker** discriminability/consistency probes — a path that never touches a forward-return target. The *only* residue of full-history fitting is that a **downstream** point-in-time backtest of the prediction model reads **mildly optimistic**, and that residue is (i) **covariate, not label** — the SSL encoder never sees returns; (ii) **bounded by the stationarity premise** — stationary identity ⇒ a future-trained vs cutoff-trained encoder yield ≈ the same `z` ⇒ leak → 0 (and if identity were non-stationary enough to matter, the deploy-averaging premise above would break first); (iii) dominated by the weights — `s_c` is one global scalar per channel, negligible. **Therefore:** treat downstream backtest numbers as upper bounds, do not conflate them with the encoder's intrinsic validity, and do **not** "fix" this (e.g. per-fold cutoff encoders) unless a strictly leak-free point-in-time backtest is *explicitly* required. Sole guardrail: never tune the encoder *against* the downstream backtest — that would turn bounded reporting-optimism into a selection feedback loop. (A validation pass that re-raises this as a defect has missed the encoding-vs-prediction distinction stated here.)
 
 (Second-order: a past window's present-set holds only survivors-to-today → mild survivorship tint in the relational context; ignore unless exact historical conditioning is needed.)
