@@ -1,353 +1,385 @@
 # Stock Identity Encoder — Specification
 
-Status: design spec, pre-implementation. 2026-06-04.
-
-A standalone model, independent of the forecasting pipeline in this repo. It produces, for any stock ticker, a 32-dimensional **identity vector** computed from the ticker's own daily candles and from the candles of other tickers over the same dates. The vector is meant to be consumed as a feature by other ML systems.
+**Status:** design spec v0.1. Standalone system; does not depend on or modify the v4 forecasting pipeline.
 
 ## 1. Goal
 
-Training shapes the identity vector to have four properties:
+Build a model that computes, for any stock, a 32-dimensional vector — its **identity embedding** — from raw daily candles, capturing a quality of the stock that is stable in time and distinguishes it from other stocks.
 
-- **Persistent** — the same ticker gets nearly the same vector regardless of which time window is used, how the ticker set was grouped, and dropout randomness.
-- **Distinctive** — different tickers get vectors separated by a margin, both within attention groups and globally.
-- **Dual-sourced** — the vector computed with both sources available (own data + peers) must be more stable than the vector computed from either source alone, so the model cannot ignore the ticker's intrinsic behavior or its relations.
-- **Inductive** — the forward pass contains no per-ticker learned parameters: no ID embeddings, no lookup tables, no timestamps. A ticker never seen in training gets its vector the same way as a training ticker: from its data and its relations to a reference set.
+The embedding must satisfy four properties:
 
-The inductive property is the load-bearing rule. Every other mechanism in this document is pressure applied on top of it.
+| Property | Meaning |
+|---|---|
+| **Persistent** | The same ticker gets (nearly) the same vector regardless of which time window, which companion group, which group size, or which dropout draw produced it. |
+| **Distinctive** | Different tickers get vectors far apart — within one window, and across windows and group sizes. |
+| **Two-route** | The vector must be derivable from the ticker's own price behavior alone *and* from its relations to other tickers alone — and the combined computation must be more reliable than either route by itself. |
+| **Inductive** | The model contains no per-ticker parameters. Any ticker with enough candle history plus a set of context tickers can be embedded at inference — including tickers never seen during training. |
 
-## 2. System overview
+The deliverable is a trained encoder (weights + configuration + an `embed()` recipe), not a lookup table. A table of embeddings for the training tickers falls out as a by-product (§6.6, §8).
+
+> **Structural invariant.** Ticker identity and calendar position never enter the model. Identity is used only for loss bookkeeping and the training-only anchor buffer (§6.6). A window's position on the timeline is used only as a loss weight (κ, §6). This makes the model inductive by construction.
+
+## 2. End-to-end picture
 
 ```mermaid
 flowchart TD
-    raw["Daily candles per ticker:<br>open, high, low, close, volume"]
-    raw --> cut["Cut timeline into non-overlapping<br>60-trading-day windows"]
-    cut --> elig["Keep tickers with no missing days<br>in at least 10 windows"]
-    elig --> norm["Normalize each (ticker, window):<br>log-returns + z-scored log-volume.<br>Removes price/volume level,<br>keeps behavior"]
-    norm --> stageA["Stage A — temporal encoder:<br>transformer over the 60 days of one ticker<br>→ one summary token per (ticker, window)"]
-    stageA --> stageB["Stage B — relational encoder:<br>attention across the tickers of a group<br>→ 32-dim identity vector per ticker"]
-    stageB --> train["TRAINING<br>Pull: same ticker together across<br>windows, groupings, dropout draws.<br>Push: different tickers apart by margin.<br>Ratchet: fused vector must beat<br>single-source vectors in stability"]
-    stageB --> infer["INFERENCE<br>query ticker + reference universe,<br>whole set as one group,<br>fused mode, dropout off"]
-    train --> artifact["ARTIFACT<br>encoder weights + featurization spec<br>+ reference universe spec<br>+ identity table of training tickers"]
-    infer --> vec["32-dim identity vector,<br>incl. for tickers never trained on"]
+    raw["Daily candles per ticker<br/>(open, high, low, close, volume)"]
+    win["Timeline cut into non-overlapping<br/>N-day windows"]
+    sample["Training step: M windows drawn,<br/>one from each era of the timeline"]
+    norm["Per-ticker normalization within window:<br/>price level and volume scale removed,<br/>shape of moves kept"]
+    temp["Temporal encoder (2-layer transformer):<br/>one ticker's window → one summary vector"]
+    grp["Tickers split into random equal-size groups,<br/>at several group sizes: one group = whole universe,<br/>down to groups of Y tickers"]
+    att["Attention inside each group — 3 views per ticker:<br/>full (self + peers) / self-only / peers-only"]
+    emb["32-dimensional embedding per<br/>(ticker, window, group size, view)"]
+    loss["Loss: same ticker → same embedding everywhere;<br/>different tickers → far apart;<br/>full view must beat both masked views"]
+    art["Artifact: trained encoder (no per-ticker parameters)<br/>+ embedding for any ticker on demand"]
+
+    raw --> win --> sample --> norm --> temp --> grp --> att --> emb --> loss
+    loss -->|"gradient updates to encoder weights"| art
 ```
 
-## 3. Terms
+## 3. Vocabulary
 
 | Term | Meaning |
 |---|---|
-| **window** | 60 consecutive trading days, cut from the timeline without overlap. Each window carries its position `t` (integer index in the tiling). |
-| **universe** | The set of tickers processed together in one training step. |
-| **partition level `k`** | The number of equal-sized groups the universe is split into. Level 1 = the whole universe as one group. |
-| **grouping** | The concrete random assignment of tickers to groups at a level. |
-| **context mode** | Which data sources the encoder may read when embedding a ticker: **fused** (own data + peers), **intrinsic** (own data only), **relational** (peers only). |
-| **replica** | One of R repeated computations of the same embedding with different dropout randomness. |
-| **anchor** | A per-ticker slow-moving average of its representation across training steps. Exists only inside the loss; never used in the forward pass. |
-| **reference universe** | The fixed, documented ticker set that provides relational context at inference. |
-| **identity table** | The final anchors of all training tickers, shipped as a ready-made lookup artifact. |
-| **identity vector** | The model's output: a 32-dimensional vector scaled to length 1. |
+| **window** `w` | `N` consecutive trading days. Windows tile the timeline without overlap. `t_w` = the window's ordinal position. |
+| **stratum** | One of `M` contiguous blocks of the window sequence (block 1 = oldest windows, block M = newest). |
+| **universe** `U_w` | The tickers with complete candle data inside window `w`. |
+| **partition scale** `s` | A choice of how many equal-size groups `U_w` is split into. Scale 1 = one group containing everyone; the finest scale has groups of minimum size `Y`. |
+| **group** `g` | One cell of a partition: the set of tickers a given ticker attends over. |
+| **observer** | The ticker whose embedding is currently being computed. |
+| **view** `v` | Which evidence the observer may use: `full` (itself + peers), `self` (itself only), `peer` (peers only). |
+| **embedding** `z` | The 32-dimensional output vector, indexed `z(ticker, window, scale, view)`. |
+| **observer dropout** | Training-only random masking of which peers an observer sees. Identical across one observer's three views, different between observers. |
+| **anchor** `a_i` | A slow-moving per-ticker average of embeddings, maintained only during training (§6.6). |
 
-## 4. Data
+## 4. Data layer
 
-Input is daily OHLCV only (open, high, low, close, volume). No other feeds.
+### 4.1 Windows
 
-### Windows
+Tile the timeline into non-overlapping windows of `N` trading days. A ticker belongs to `U_w` only if all `N` days are present. The window index `t_w` is recorded for loss weighting and is never fed to the model — a model that can see calendar position can fingerprint eras, which contradicts persistence.
 
-- Length N = 60 trading days, stride 60 — windows never overlap. Overlapping windows would share raw days, letting the consistency losses be satisfied by shared data instead of shared identity.
-- Window position `t` is used only inside the loss (proximity weighting, §7). It is never a model input.
+### 4.2 Step sampling
 
-### Eligibility
-
-A ticker enters training only if it has no missing days in at least 10 windows. Two windows is the hard floor (every consistency comparison needs a pair); the rest is margin so the batch scheduler always finds usable combinations and validation windows can be held out without making the ticker untrainable. Eligibility is counted on training windows only.
-
-### Features
-
-Per day, per ticker, 5 values (the first day of a window needs the previous day's close, so a window consumes 61 raw days):
-
-| Feature | Definition |
-|---|---|
-| `r_c` | log(close_today / close_yesterday) |
-| `r_o` | log(open_today / close_yesterday) |
-| `r_h` | log(high_today / close_yesterday) |
-| `r_l` | log(low_today / close_yesterday) |
-| `v` | log-volume, z-scored (mean subtracted, divided by standard deviation) within that one (ticker, window) pair |
-
-The normalization principle: remove **nominal** scale, keep **behavioral** structure. Price level and share-volume level are arbitrary (stock splits change them) and would let the model identify tickers by trivial fingerprint. Volatility level, bar shape, co-movement, and volume dynamics are genuine behavior and survive the transform. Returns are deliberately **not** divided by per-window volatility — volatility is a real quality, not a fingerprint.
-
-No timestamps, no calendar features, no ticker IDs anywhere in the input. The model must never be able to identify a ticker through a side channel.
-
-## 5. Model
-
-Two encoders, applied in sequence.
-
-### Stage A — temporal encoder
-
-Per (ticker, window): the 60×5 feature matrix goes through a 2-layer transformer encoder (a standard sequence model built from attention layers — attention: an operation where a query item summarizes a set of items as a weighted average, with learned weights). Positions are encoded relative to the window start (day index only). Output is mean-pooled into one summary token `h` of dimension 96.
-
-Stage A runs once per (ticker, window, replica) per step and its output is reused by every level and mode below — the per-day sequence work never repeats.
-
-### Stage B — relational encoder
-
-Per group: 2 blocks of attention applied across the group members' Stage-A tokens. No positional encoding across tickers — the operation is order-independent. Attention normalizes over however many keys are present — the operation is group-size-independent. A single shared output head maps to 32 dimensions, then the vector is scaled to length 1.
-
-Length-1 scaling closes a degenerate strategy: without it, "push different tickers apart" is satisfiable by inflating all vector magnitudes and "pull same ticker together" by shrinking them. On the unit sphere only direction matters.
-
-### Context modes
-
-For a query ticker T in group G, the three modes differ **only** in which tokens serve as attention keys/values (the content sources). The query is always T's own token.
-
-```mermaid
-flowchart TD
-    subgraph tokens["Stage A tokens for one group, one window"]
-        self["Token of ticker T"]
-        peers["Tokens of T's group peers"]
-    end
-    self -->|"query — always T's own token"| fused["FUSED mode"]
-    self -->|"query"| intr["INTRINSIC mode"]
-    self -->|"query"| rel["RELATIONAL mode"]
-    self -->|"keys/values"| fused
-    peers -->|"keys/values"| fused
-    self -->|"keys/values"| intr
-    peers -->|"keys/values"| rel
-    fused --> eF["e_fused — identity vector<br>from own + peer data"]
-    intr --> eS["e_intrinsic — identity vector<br>from own data only"]
-    rel --> eP["e_relational — identity vector<br>from peer data only"]
-```
-
-Three rules:
-
-- **Masking restricts content, never the query.** In relational mode, T's token steers the attention (selects which peer information is relevant to T) but contributes no content. This is forced, not a compromise: if the query were a shared T-blind probe, every member of a group would receive a near-identical relational embedding, and within-group separation (loss L4) would be unattainable for that mode.
-- **Intrinsic mode is independent of grouping** (its keys are just T's own token), so it is computed once per (ticker, window, replica), with no level axis. Its grouping-consistency loss L1 is zero by construction.
-- **All modes share all parameters.** The mask is the only difference, so stability comparisons across modes (loss L5) compare like with like.
-
-### Dropout
-
-Dropout = randomly zeroing a fraction of internal values during training so the model cannot rely on any single one. Two kinds here, both training-only; inference is fully deterministic.
-
-- **Feature dropout** (rate 0.1, both stages): for a fixed (ticker, window, level, replica), the same dropout masks are used across all three modes — so differences between modes reflect the masking, not noise. Masks differ across replicas.
-- **Peer-edge dropout** (rate 0.15, Stage B): each (query, peer) attention edge is dropped independently, per replica and per query. The relational summary must survive losing any individual peer, so it cannot be a memorized lookup of specific group-mates. In relational mode at least one peer is kept visible (redraw if all edges drop).
-
-R = 2 replicas per step. Replica disagreement is itself penalized (loss L_rep), which is the mechanism forcing identity to rest on robust qualities rather than fragile detail.
-
-Normalization layers are LayerNorm only (uses one item's own values). **No BatchNorm** (uses statistics of the whole batch) — it would mix information across tickers in a batch and behave differently at inference.
-
-## 6. Training step assembly
-
-Each step:
-
-1. **Windows**: take the next X = 6 windows from this epoch's random permutation of all training windows — every window is used once per epoch before any reuse, and groupings never repeat across reuses (see step 4). Batches are assembled to mix near-in-time and far-in-time windows, so the proximity weighting in §7 sees a range of distances.
-2. **Universe**: a random subset (≤ 128 tickers) of the tickers eligible in **all** X windows. If the intersection is smaller than 32, redraw the window batch.
-3. **Levels**: a set K containing level 1 (whole universe, always included — it is the inference context) plus sampled levels, with the smallest group size ≥ 8. Example at universe 128: K = {1, 4, 16}. At least two levels per step (the cross-level losses need pairs).
-4. **Groupings**: one random equal-sized partition per level per step, **shared across the step's X windows** — so "same ticker, same peers, different window" is a controlled comparison; group composition still changes every step. The partition is seeded by hash(epoch, step, level): reproducible, and repeats are structurally impossible. If the universe doesn't divide evenly, group sizes may differ by 1.
-
-```
-for each training step:
-    W ← next 6 windows from this epoch's permutation
-    U ← random subset (≤128) of tickers eligible in all of W
-    K ← {1} ∪ sampled levels, smallest group ≥ 8
-    for k in K:  P_k ← partition of U into k groups, seeded by hash(epoch, step, k)
-
-    for r in 1..2:                                        # dropout replicas
-        h[i,w] ← StageA(features(i,w))                    # every ticker i, window w
-        e_intr[i,w,r] ← StageB(query=h[i,w], keys/values={h[i,w]})        # once, no level axis
-        for k in K, group G in P_k, ticker i in G, window w in W:
-            e_fused[i,w,k,r] ← StageB(query=h[i,w], keys/values={h[j,w] : j in G})
-            e_rel[i,w,k,r]   ← StageB(query=h[i,w], keys/values={h[j,w] : j in G, j ≠ i})
-
-    aggregate replica/window/level means; compute losses (§7); backprop; optimizer step
-    update anchors (§7, L6)
-```
-
-## 7. Loss
-
-### Notation
-
-```
-e[i,w,k,r]   one embedding sample: ticker i, window w, partition level k, replica r
-             (each context mode has its own e; intrinsic mode has no k axis)
-ê[i,w,k]     mean over replicas r
-m[i,k]       mean over the step's windows w
-ē[i]         mean over levels k  — ticker i's representation this step
-hinge(x)     max(0, x) — contributes only while a constraint is violated, silent once satisfied
-sg(x)        stop-gradient: x is used as a constant; training adjusts nothing through it
-‖a − b‖      Euclidean distance. All vectors have length 1, so distances lie in [0, 2];
-             two random 32-dim unit vectors are ≈ 1.41 apart — this calibrates the margins.
-```
-
-How the aggregates relate, and where each loss attaches:
+Split the window sequence into `M` contiguous strata. Each training step draws **one window per stratum**, so every step compares a ticker against itself across the full span of history.
 
 ```mermaid
 flowchart LR
-    e["one embedding sample<br>(ticker, window, level, replica)"]
-    e -->|"mean over dropout replicas"| ehat["ê — per (ticker, window, level)"]
-    ehat -->|"mean over the step's windows"| m["m — per (ticker, level)"]
-    m -->|"mean over levels"| ebar["ē — the ticker's<br>representation this step"]
-    ebar -->|"slow moving average<br>across training steps"| anc["anchor — per ticker,<br>loss target only"]
-    Lrep["L_rep — replicas of one embedding<br>must agree"] -.-> e
-    L3n["L3 — same ticker must agree<br>across windows"] -.-> ehat
-    L4n["L4 — group peers must differ<br>by a margin, same window"] -.-> ehat
-    L1n["L1 — same ticker must agree<br>across partition levels"] -.-> m
-    L2n["L2 — different tickers must differ<br>by a margin, across levels"] -.-> m
-    L6n["L6 — step representation must<br>stay near the ticker's anchor"] -.-> ebar
-    L7n["L7 — across tickers, all 32 dimensions<br>must vary and not duplicate each other"] -.-> ebar
+    subgraph timeline["Window timeline, oldest → newest, cut into M strata"]
+        s1["Stratum 1<br/>(oldest windows)"]
+        s2["Stratum 2"]
+        sd["…"]
+        sM["Stratum M<br/>(newest windows)"]
+    end
+    step["One training step:<br/>M windows spanning the whole history"]
+    s1 -->|"1 window, drawn<br/>without replacement"| step
+    s2 -->|"1 window"| step
+    sd -->|"…"| step
+    sM -->|"1 window"| step
 ```
 
-L5 is not in the chart: it compares whole modes against each other (below).
+Draws are without replacement: each stratum keeps a shuffled queue and reshuffles only when the queue runs out. Consequences: no window is reused before all others in its stratum have been used, and since every stratum drains at one window per step, the whole timeline cycles nearly simultaneously.
 
-L_rep and L1–L4 are computed per mode, then combined with mode weights (fused 1.0, intrinsic 0.5, relational 0.5). For the intrinsic mode, which has no level axis: L1 ≡ 0, and L2 runs over plain ticker pairs.
+### 4.3 Grouping
 
-### Pull terms (consistency)
+On each visit to a window, for each scale `s` in the ladder `𝒢`, draw a **fresh uniformly random partition** of `U_w` into `n_s` groups of equal size (±1), every group at least `Y` tickers.
 
-**L_rep — replica consistency.** Identity must survive dropout perturbation.
+- Ladder default: geometric — `n_s ∈ {1, 2, 4, 8, …}`, capped so the smallest group still has `Y` tickers. Dense option: every integer group count from 1 to the cap.
+- Partition randomness is seeded by `(window id, visit counter)`. With hundreds of tickers the number of possible partitions is astronomically large, so fresh seeded draws never repeat a grouping in practice — no bookkeeping needed.
 
-```
-L_rep = mean over (i,w,k) of   mean over r of  ‖e[i,w,k,r] − ê[i,w,k]‖²
-```
+### 4.4 Eligibility
 
-**L1 — grouping consistency.** A ticker's representation must not depend on how the universe happened to be partitioned.
+A ticker enters a loss term only when the data that term needs exists (e.g., temporal consistency needs the ticker present in at least 2 of the step's windows). Ineligible tickers still participate fully as attention context for others.
 
-```
-L1 = mean over i of   mean over k of  ‖m[i,k] − ē[i]‖²
-```
+## 5. Model
 
-**L3 — temporal consistency.** The core term: a ticker's representation must not change across windows. Pairwise over the step's windows, with two weightings.
+### 5.1 Candle normalization
 
-```
-L3 = mean over i of   [ Σ_k ρ_k · Σ_{w<w′} ω(|t_w − t_w′|) · ‖ê[i,w,k] − ê[i,w′,k]‖² ]
-                    / [ Σ_k ρ_k · Σ_{w<w′} ω(|t_w − t_w′|) ]
-
-ω(Δ) = 1 + exp(−Δ/3)        proximity weighting (Δ in window units): instability between
-                             near-in-time windows is penalized up to 2×; the factor decays
-                             to 1 with distance. Near-window stability is non-negotiable;
-                             long-range settlement is L6's job.
-ρ_k = g_k / (g_k + 8)        context-mass weighting (g_k = group size at level k): smaller
-                             groups give noisier relational context, so their instability
-                             counts proportionally less.
-```
-
-L1 and L3 are a clean decomposition: the total spread of a ticker's embeddings over (window, level) splits exactly into an across-level part (L1) and an across-window part (L3). No double counting.
-
-### Push terms (separation)
-
-Both use a margin: push apart until the required distance is reached, then stop. Hinged terms self-retire — this, not hand-tuned decay schedules, is what keeps the push terms from fighting the pull terms forever.
-
-**L2 — global separation.** Any two tickers, compared across different levels, must differ. Given L1 holds, this separates them within levels too, and it covers ticker pairs that never share a group (which L4 cannot reach).
+Per ticker, per window, day `t` becomes five features:
 
 ```
-L2 = mean over sampled pairs {(i,k),(j,k′) : j ≠ i, k′ ≠ k} of   hinge(1.0 − ‖m[i,k] − m[j,k′]‖)²
+( log O_t/C_{t−1},  log H_t/C_{t−1},  log L_t/C_{t−1},  log C_t/C_{t−1},  log V_t/median_w(V) )
 ```
 
-Pairs are subsampled for cost. Margin 1.0 against the ≈1.41 random-pair baseline.
+`O, H, L, C, V` = open, high, low, close, volume. The first day uses its own open as the base. Optionally clip log-returns at quantile `q_clip` to absorb splits and halts.
 
-**L4 — local separation.** Peers inside the same group — the pairs the attention actually computed together — get the strongest, best-informed push, with a tighter margin.
+This removes the two cheap identity fingerprints — absolute price level and absolute volume — while keeping what is legitimately the stock's own behavior: shape of moves, gaps, daily ranges, relative volume dynamics.
 
-```
-L4 = mean over (k, w, group G, i∈G, j∈G\{i}), weighted by ρ_k, of
-         hinge(0.7 − ‖ê[i,w,k] − ê[j,w,k]‖)²
-```
+### 5.2 Temporal encoder
 
-### L5 — relational gain (the mode ratchet)
+A 2-layer transformer of width `d_model` with `n_h` attention heads reads one ticker's normalized window — one token per day, positional information = day index **within the window** only — and a learned summary token collects the result. Output: one summary vector `h_i` per ticker per window.
 
-Define each mode's **instability** as its pull-term sum: `T_mode = L1_mode + L3_mode` (for intrinsic, just L3). Lower T = more stable.
+This stage is strictly per-ticker. All cross-ticker information flows through §5.3.
 
-```
-L5 = hinge( T_fused − 0.8 · sg(min(T_intrinsic, T_relational)) )
-```
+### 5.3 Context module — three views
 
-Meaning: the fused embedding must be at least 20% more stable than the better of the two single-source modes (beating the better one beats both). The baseline inside sg() is frozen each step, so this constraint **cannot** be satisfied by degrading the single-source modes — gradient flows only into improving the fused one. The single-source modes are trained solely by their own copies of L_rep and L1–L4, which keep them as good as they can be. Net effect: own-data-only and peers-only pathways are each forced to be individually strong, and the fused pathway is forced to combine them into something strictly stabler — neither source can be ignored.
+*Attention, as used here: each ticker forms a weighted average of other tickers' vectors, with learned weights reflecting relevance. The weights are normalized to sum to 1, so groups of any size aggregate the same way, and no ordering information is attached to tickers, so the result does not depend on how the group is listed.*
 
-L5 turns on after a 2-epoch warm-up (before the pathways stabilize, the baseline is noise).
+`L_ctx` attention blocks run over a group's summary vectors. Each block computes attention, then a small per-ticker feed-forward layer, and adds its input back to its output (a **residual connection** — this detail matters below). For every observer, the same weights produce three views:
 
-### L6 — identity anchor (settlement across training time)
-
-Each training ticker has an anchor `a_i`: a slow-moving average of its fused-mode step representations. Initialized to `ē_fused[i]` the first step the ticker appears (no L6 contribution that step). Each later step, in this order:
-
-```
-L6:      mean over i of  ‖ē_fused[i] − sg(a_i)‖²          penalize against the pre-update anchor
-update:  a_i ← scale_to_length_1( (1 − c)·a_i + c·ē_fused[i] )
-         c  = 0.05 · L̄ / (L̄ + L_step)                      anchor moves faster when this step's loss
-         L̄  ← 0.99·L̄ + 0.01·L_step                          is below its running average — the model
-                                                            is trusted more when it is doing well
-```
-
-The pull works both ways: the model is drawn toward the anchor (L6), and the anchor chases the model (the update), faster under low loss — so the anchor never goes stale. Penalizing before updating prevents a confident step from absorbing its own penalty. The anchor never enters the forward pass — the inductive property is untouched — and the final anchors double as the shipped **identity table**.
-
-### L7 — dimension usage
-
-Prevents the model from packing identity into a few dimensions and leaving the rest dead or duplicated. Over the step's fused representations, centered: `b_i = ē_fused[i] − mean_j ē_fused[j]`, with per-dimension standard deviation `s_d` and covariance matrix `C`:
-
-```
-L7 = Σ_d hinge(0.18 − s_d)²   +   Σ_{d≠d′} C[d,d′]²
+```mermaid
+flowchart LR
+    subgraph fullv["FULL view — both routes"]
+        direction TB
+        fA["A's own summary"] --> fZ["Embedding of A:<br/>internal + relational evidence"]
+        fB["Peer B's summary"] --> fZ
+        fC["Peer C's summary"] --> fZ
+    end
+    subgraph selfv["SELF view — internal route only"]
+        direction TB
+        sA["A's own summary"] --> sZ["Embedding of A:<br/>internal evidence only"]
+    end
+    subgraph peerv["PEER view — relational route only"]
+        direction TB
+        pB["Peer B's summary"] --> pZ["Embedding of A:<br/>relational evidence only<br/>(A's own content blocked;<br/>peers never read A)"]
+        pC["Peer C's summary"] --> pZ
+    end
 ```
 
-First sum: every dimension must vary across tickers (0.18 ≈ 1/√32, the per-dimension spread of vectors spread evenly over the sphere). Second sum: no two dimensions may encode the same thing. Together with L2/L4 this also blocks the global failure mode of all pull terms — everything collapsing to one point.
+- **full** — the observer attends itself and all peers. One pass serves the whole group.
+- **self** — attention restricted to each ticker itself; the block reduces to a per-ticker transformation under the same weights. One pass serves the whole group. Using identical weights with withheld context is the point: differences between views are attributable to the withheld evidence, not to different functions.
+- **peer** — the observer reads peers, peers never read the observer, and the observer's entry residual is cut. Two leaks force this construction:
+  1. The residual connection would carry the observer's own content into the output even with self-attention masked — so the observer's entry residual is severed.
+  2. In any block after the first, peers' vectors would already contain the observer's content (absorbed when they read the observer in block 1) and would reflect it back — so peers must never read the observer at all.
 
-### Total
+  With both leaks closed, the observer's own content reaches the output only as it is genuinely mirrored in how peers behave — exactly the relational signal this view isolates.
+
+  Cost: the exact peer view needs one pass per observer (`g` passes for a group of size `g`). Knob `g_exact`: exact below it; above it, a shared-context approximation is allowed (peers' vectors computed once with everyone present). The leak in the approximation shrinks as `1/g`, so approximating only large groups is safe.
+
+A final linear layer maps `d_model → D = 32`. The embedding space is not normalized to unit length; its scale is set by the utilization term (§6.7).
+
+### 5.4 Observer dropout
+
+*Dropout: randomly disabling parts of a computation during training so the model cannot rely on any single pathway. Here it is applied at the attention level, and only during training — inference is fully deterministic.*
+
+Per (observer, window, scale): draw one random mask over **which peers the observer may see** this step, and reuse the identical mask across the observer's three views — so view differences are never dropout noise. Masks are independent across observers: every ticker sees its own randomly thinned version of the group, so a group's exact composition can never be memorized as a lookup key. Standard dropout at rate `p_ff` applies inside feed-forward layers. One draw per observer per step.
+
+Intentional side effect: the self view does not depend on the group at all, so across scales it varies only through dropout draws. Scale consistency applied to the self view (§6.1) therefore directly penalizes dropout sensitivity — embeddings must rest on qualities robust to deletion of random evidence.
+
+## 6. Loss
+
+All terms are computed from one training step's embeddings.
+
+```mermaid
+flowchart TD
+    Z["Embeddings from one training step:<br/>z(ticker, window, group size, view),<br/>views = full / self / peer"]
+    Z --> SC["Scale consistency (per view):<br/>same ticker across group sizes<br/>→ same embedding"]
+    Z --> TC["Temporal consistency (per view):<br/>same ticker across windows → same embedding<br/>(close windows weighted up,<br/>small groups weighted down)"]
+    Z --> XS["Cross-scale separation (per view):<br/>different tickers at different group sizes<br/>→ at least margin apart"]
+    Z --> PS["Peer separation (per view):<br/>different tickers in the same group<br/>→ at least margin apart"]
+    SC --> SYN["Synergy:<br/>full view must be more consistent than<br/>the better of self-only / peers-only"]
+    TC --> SYN
+    Z --> ANC["Anchor:<br/>per-ticker step average must track its<br/>slow-moving average across training steps"]
+    Z --> UTIL["Utilization:<br/>every one of the 32 dimensions varies across<br/>tickers; no two dimensions duplicate each other"]
+    SC --> TOT["Total loss = weighted sum;<br/>each term divided by the running<br/>average of its own magnitude"]
+    TC --> TOT
+    XS --> TOT
+    PS --> TOT
+    SYN --> TOT
+    ANC --> TOT
+    UTIL --> TOT
+```
+
+**Notation.** `z_i^{w,s,v}` — embedding of ticker `i` in window `w` at scale `s` under view `v`. `μ_i^{s,v}` — mean of `z_i` over the step's windows containing `i`, at scale `s`, view `v`. `Var{…}` — variance per dimension, summed over the `D` dimensions (equivalently, mean squared distance to the mean). `d(x,y)` — Euclidean distance. `sg(·)` — stop-gradient: the value is treated as a constant when computing training updates. `ε` — small constant preventing division by zero.
+
+Two reusable weights:
+
+- **Proximity** `κ(Δ) = 1 + α_prox · exp(−Δ/τ_prox)`, where `Δ` is the distance between two windows in window-index units. Windows close in time *must* agree (boosted penalty); windows far apart may carry legitimate slow drift (baseline weight 1, never zero).
+- **Context trust** `ω(g) = (g−1)/(g−1+c_g)`, rising toward 1 with group size `g`. A ticker seen with only `Y−1` random peers has a noisy context; fluctuation there is partly sampling noise, so thin contexts get less vote. `c_g` = group size at which trust reaches ½.
+
+### 6.1 Scale consistency `L_sc(v)`
 
 ```
-L = Σ_modes α_mode · ( λ1·L1 + λ2·L2 + λ3·L3 + λ4·L4 + λrep·L_rep )
-    + λ5·L5 + λ6·L6 + λ7·L7
-
-α_fused = 1.0,  α_intrinsic = α_relational = 0.5
+L_sc(v) = Σ_i  Var over s of  μ_i^{s,v}
 ```
 
-Weight calibration: start all λ at 1; after ~300 steps rescale each λ so every term contributes the same order of gradient magnitude on the embeddings; then leave them fixed. Schedules: λ5 ramps in after the 2-epoch warm-up; λ6 activates from epoch 2 (epoch 1 initializes anchors); everything else constant.
+A ticker's window-averaged embedding must not depend on how many tickers it was grouped with.
+
+### 6.2 Cross-scale separation `L_xsep(v)`
+
+Pairs: ticker `i` at scale `s` against every other ticker `j ≠ i` at every other scale `s' ≠ s`.
+
+```
+L_xsep(v) = mean over pairs of  max(0, m_sep − d(μ_i^{s,v}, μ_j^{s',v}))²
+```
+
+Different tickers must sit at least `m_sep` apart even when embedded under different group sizes. The penalty is zero once the margin is met — separation has a finish line, so this term cannot push the space apart indefinitely. (Alternative form, heavier tails, no finish line: `1/(mean pair distance + ε)`.)
+
+### 6.3 Temporal consistency `L_tc(v)` — the core persistence demand
+
+```
+L_tc(v) = Σ_i Σ_s  ω(g_s) · [ Σ_{w<w'} κ(Δ_ww') · d(z_i^{w,s,v}, z_i^{w',s,v})² ]  /  [ Σ_{w<w'} κ(Δ_ww') ]
+```
+
+Same ticker, different eras → same embedding. Near-window pairs are weighted up by κ; thin-context scales are weighted down by ω. (With κ and ω constant this equals exactly twice the across-window variance; the pairwise form exists so κ can attach to window pairs.)
+
+### 6.4 Peer separation `L_psep(v)`
+
+Within each group, at each (window, scale):
+
+```
+L_psep(v) = mean over (w,s), observers i, peers j of  max(0, m_sep − d(z_i^{w,s,v}, z_j^{w,s,v}))²
+```
+
+In any single window, in any group, a ticker must not blend into its peers. (Same alternative form as 6.2.)
+
+**Coverage.** 6.4 separates tickers within a window at one scale — and at scale 1 the "group" is the whole universe, so same-window global separation is included. 6.2 separates across scales. 6.1 + 6.3 collapse each ticker's set of embeddings toward a single point. Jointly: one tight point per ticker, all points at least `m_sep` apart, stable across time, scale, grouping, and dropout. Cross-window separation between *different* tickers follows from 6.3 + 6.4 combined and needs no term of its own.
+
+**Per-view application.** Terms 6.1–6.4 are computed for each of the three views, and the views are themselves weighted:
+
+```
+L_bundle(v) = λ_sc·L_sc(v) + λ_xsep·L_xsep(v) + λ_tc·L_tc(v) + λ_psep·L_psep(v)
+```
+
+### 6.5 Synergy `L_syn`
+
+Per-view inconsistency: `I_v = L_sc(v) + L_tc(v)` (the two consistency terms only). Precision: `P_v = 1/(I_v + ε)`.
+
+```
+L_syn = (P_self + P_peer) / (P_full + ε)
+      = 2·(I_full + ε) / HM(I_self + ε, I_peer + ε)        HM(a,b) = 2ab/(a+b), the harmonic mean
+```
+
+The full view's inconsistency must be small relative to the harmonic mean of the masked views' inconsistencies. The harmonic mean hugs the smaller of its two inputs, so the bar automatically tracks whichever masked route is currently stronger. The ratio scales smoothly with how much better the full view is (no hard threshold), and multiplying all inconsistencies by a constant changes nothing — the term stays calibrated as losses shrink over training.
+
+The term can fall by improving the full view or by degrading the masked views; degradation is taxed by 6.1/6.3 applied to those views. This tension is intentional — the equilibrium is set by `λ_syn` against the masked views' bundle weights. Two variants:
+
+- **A (default):** training updates flow into numerator and denominator both — the designed tug-of-war.
+- **B:** masked inconsistencies are wrapped in `sg(·)` inside `L_syn` only, so synergy pressure can only improve the full view; masked quality is then governed solely by their own terms.
+
+The choice is empirical: log `I_full`, `I_self`, `I_peer` every step; if masked inconsistencies climb while their own weighted terms say they should not, switch A → B.
+
+### 6.6 Anchor `L_anc`
+
+One buffer `a_i ∈ ℝ^D` per training ticker — training-only state, never used at inference. Per step, in this order:
+
+```
+z̄_i  = mean over (w,s) of z_i^{w,s,full}          # the step's estimate; tracks the deployment view (full)
+Δ_i  = (1/D) · ‖z̄_i − a_i‖₁                       # mean absolute difference to the anchor BEFORE update; sg(a_i)
+η_i  = η₀ · exp(−I_i / τ_gain)                     # I_i = ticker i's own full-view inconsistency this step
+a_i  ← (1 − η_i)·a_i + η_i·sg(z̄_i)                # exponential-moving-average update, AFTER Δ_i is taken
+L_anc = mean over eligible i of Δ_i
+```
+
+The gain rule: when the model is currently consistent about ticker `i`, the fresh estimate is trustworthy and moves the anchor faster; when inconsistent, the anchor barely moves. Each ticker's representation settles into a fixed value across training, while that value keeps tracking current good estimates instead of freezing on stale history. At the end of training, `{a_i}` is a ready-made canonical embedding table for the training universe.
+
+### 6.7 Utilization `L_util`
+
+Over the step's population of full-view means `{μ_i}`: let `v_d` = variance of dimension `d` across tickers, and `ĉ` = the D×D correlation matrix across tickers.
+
+```
+L_var  = (1/D) · Σ_d  max(0, √v₀ − √(v_d + ε))²        # every dimension must vary across tickers by at least v₀
+L_cov  = mean over d ≠ d' of  ĉ_{dd'}²                  # no dimension may duplicate another
+L_util = L_var + λ_cov · L_cov
+```
+
+This is also the anti-collapse backstop: the cheapest global solution to the consistency terms is "every ticker the same constant vector". The variance floor outlaws that per dimension, and decorrelation makes 32 dimensions mean 32 distinct degrees of freedom rather than one signal copied 32 times.
+
+### 6.8 Total
+
+```
+L = Σ_v λ_v · L_bundle(v)  +  λ_syn·L_syn  +  λ_anc·L_anc  +  λ_util·L_util
+```
+
+Before weighting, each term is divided by a frozen running average of its own magnitude: `L̂_k = L_k / sg(EMA_β[L_k] + ε)`. As any term's raw size shrinks over training, its normalized value stays near 1, so the λ's remain pure relative priorities throughout. Principal tuning knob: `λ_syn` (sets the masked↔full equilibrium). The geometry's scale is set jointly by `m_sep` and `v₀`.
+
+## 7. Training step
+
+```
+windows = [stratum_queue[k].pop() for k in 1..M]          # refill + reshuffle a queue only when empty
+for w in windows:
+    U_w  = tickers complete in w
+    H[w] = temporal_encoder(normalize(candles(w)))         # one summary vector per ticker
+    for s in ladder(|U_w|):                                # n_s groups, each ≥ Y tickers
+        P[w,s] = fresh_partition(U_w, n_s, seed=(w.id, visit_counter[w]))
+        for g in P[w,s]:
+            draw per-observer dropout masks for g
+            z[·,w,s,full] = context_module(H[w][g], view=full)   # one pass for the group
+            z[·,w,s,self] = context_module(H[w][g], view=self)   # one pass for the group
+            z[·,w,s,peer] = context_module(H[w][g], view=peer)   # one pass per observer (exact ≤ g_exact)
+            # all three passes reuse each observer's dropout masks
+compute terms 6.1–6.5 and 6.7 over eligible tickers
+compute z̄_i; compute Δ_i; update anchors; add 6.6
+L = normalized weighted sum  →  backpropagate  →  optimizer step
+```
+
+Sizing for this repo's data (~348 tickers, ~25 years of daily candles ≈ 98 windows at `N = 64`): `M = 4` windows per step, 6-scale geometric ladder. Full and self views cost one pass per (window, scale). The only heavy item is the exact peer view at the universe scale (348 passes over 348 tickers) — feasible on GPU, and capped by `g_exact` if needed. The anchor buffer is 348 × 32 floats — negligible.
 
 ## 8. Inference and artifact
 
-To embed a ticker (training-set or unseen) as of date D:
+Inference is deterministic — no dropout.
 
-1. Build its 5-feature window(s) ending at D (61 raw days per window).
-2. Build the same windows for every reference-universe ticker.
-3. Stage A on all tickers; Stage B in **fused mode, level 1** (the whole reference set plus the query as one group); dropout off.
-4. Output: the 32-dim identity vector. Average over the last few windows if a smoother value is wanted.
+```
+embed(target_candles, context_candles, windows):
+    for each window: normalize → temporal encoder → full view,
+        single-group scale, context = training universe present in that window
+    return the average embedding over the last K_inf windows
+```
 
-The shipped artifact has three parts, all under the same version:
+Averaging over windows is residual-noise reduction, not correction — training already forces agreement across windows, groupings, and scales.
 
-1. **The function** — encoder weights + featurization spec. The inductive object: embeds tickers never seen in training.
-2. **The reference universe spec** — which tickers, which window length. The embedding is relational by design, so it is conditioned on this set; leaving it undocumented makes embeddings irreproducible.
-3. **The identity table** — final anchors for all training tickers, for direct lookup without running inference.
+Because the embedding is relational by design, **inference requires contemporaneous candles for the context tickers**. The artifact therefore bundles:
 
-## 9. Evaluation
+1. Encoder weights + configuration (`N`, `D`, ladder, normalization spec, universe ticker list).
+2. A context-fetch recipe (which tickers, which date ranges).
+3. A canonical embedding table for the training universe — either the final anchors `{a_i}` (training-history consensus) or freshly recomputed embeddings over recent windows (recommended; fresher).
 
-Holdouts: the most recent windows (time holdout) and ~10% of tickers excluded from every training universe (inductive holdout).
+**Acceptance test** — the number this system stands on:
 
-| Check | Method | Want |
+1. Hold out `k` tickers entirely from training.
+2. After training, embed them across many windows.
+3. Check that (a) their across-window consistency matches the trained tickers' — persistence transfers to unseen tickers; and (b) given embeddings from one set of windows, each held-out ticker's embedding from a *different* set of windows finds itself as nearest neighbor — distinctiveness transfers.
+
+Training loss going down does not certify the goal; this test does.
+
+## 9. Hyperparameters
+
+| Symbol | Meaning | Default |
 |---|---|---|
-| Persistent + distinctive, one number | Embed each ticker in two disjoint held-out windows; for each vector from window A, find the nearest vector from window B among all tickers. Report match rate (Recall@1) and mean reciprocal rank. | High |
-| Inductive (headline metric) | Same retrieval, on held-out tickers only. | High |
-| Stability over time | Mean same-ticker distance as a function of window gap. | Low, flat-ish, rising slowly |
-| Relational gain | T_fused / min(T_intrinsic, T_relational) during training. | Falls below 0.8, stays |
-| Reference sensitivity | Same ticker, same window, different random reference subsets → spread of resulting vectors. | Small |
-| Dimension usage | Effective rank of the embedding covariance. | Approaches 32 |
+| `N` | window length, trading days | 64 |
+| `M` | strata = windows per training step | 4 |
+| `Y` | minimum group size | 8 |
+| `D` | embedding dimension | 32 |
+| — | temporal encoder depth | 2 layers |
+| `d_model`, `n_h` | encoder width, attention heads | 128, 4 |
+| `L_ctx` | context module depth | 2 blocks |
+| `𝒢` | scale ladder | geometric {1, 2, 4, …}, smallest group ≥ Y |
+| `p_attn` | observer dropout rate | 0.15 |
+| `p_ff` | feed-forward dropout rate | 0.10 |
+| `α_prox`, `τ_prox` | proximity boost and its decay length | 1.0, (#windows)/10 |
+| `c_g` | context half-trust group size | 16 |
+| `m_sep` | separation margin | √D/2 ≈ 2.8 (with v₀ = 1) |
+| `v₀` | per-dimension variance floor | 1.0 |
+| `λ_cov` | decorrelation weight inside L_util | 1.0 |
+| `η₀`, `τ_gain` | anchor base gain, gain temperature | 0.05, running mean of I_i |
+| `β` | decay of the running-magnitude averages (§6.8) | 0.99 |
+| `ε` | numerical safety constant | 1e−6 |
+| `λ_full / λ_self / λ_peer` | view weights | 1.0 / 0.5 / 0.5 |
+| `λ_sc, λ_tc, λ_xsep, λ_psep, λ_anc, λ_util` | term priorities | 1.0 each |
+| `λ_syn` | synergy priority — principal knob | 0.3 |
+| `g_exact` | exact peer-view threshold | 64 |
+| `q_clip` | log-return clipping quantile | 0.999 |
+| `K_inf` | windows averaged at inference | 4 |
+| — | dropout draws per observer per step | 1 |
 
-During training, log per-term loss curves alongside. Concerns about training dynamics (e.g., "identities may settle into sector-level clusters instead of ticker-level ones") are answered by the retrieval metrics, not argued in advance.
+## 10. Instrumentation
 
-## 10. Hard rules
+Log from day one — the open knobs are tuned against these, not against intuition:
 
-- No ticker-indexed parameters anywhere in the forward pass.
-- No timestamps, calendar features, or ticker IDs as input; window position exists only in loss weights.
-- Windows never overlap.
-- Masking restricts attention keys/values, never the query.
-- Identical feature-dropout masks across the three modes within one replica.
-- Groupings never repeat (seeded by hash(epoch, step, level)).
-- Dropout off at inference; inference is deterministic.
-- Anchors live only in the loss; never in the forward pass, never at inference.
-- LayerNorm only; no BatchNorm.
-- Inference depends on nothing beyond the model weights and the documented reference universe.
+- Per-term magnitudes, raw and normalized.
+- `I_full`, `I_self`, `I_peer` trajectories (synergy health; decides variant A vs B in §6.5).
+- Per-dimension variance spectrum of `{μ_i}` (collapse watch).
+- Anchor drift distribution `‖z̄_i − a_i‖`.
+- Agreement between embeddings of the same ticker under re-drawn partitions at a fixed window.
+- Held-out-ticker retrieval accuracy (§8) — the acceptance metric.
 
-## 11. Configuration (starting values)
+## 11. Open knobs
 
-```
-Data        N=60 days/window, stride 60, eligibility ≥10 windows, OHLCV only
-Step        X=6 windows, universe ≤128 (redraw if intersection <32), levels {1,4,16}, min group 8
-Stage A     2 transformer layers, width 96, 4 heads, mean-pool
-Stage B     2 attention blocks, shared head → 32 dims, scaled to length 1
-Dropout     feature 0.1, peer-edge 0.15, replicas R=2
-Margins     global 1.0, local 0.7        (vs ≈1.41 random-pair baseline)
-L3 weights  proximity ω(Δ)=1+exp(−Δ/3), context-mass ρ(g)=g/(g+8)
-L5          κ=0.8, warm-up 2 epochs
-L6          c_max=0.05, loss-average rate 0.01, active from epoch 2
-L7          per-dim floor 0.18, decorrelation weight 1
-Modes       α: fused 1.0, intrinsic 0.5, relational 0.5
-λ           init 1 each, gradient-balance once after ~300 steps, then fixed
-```
+Numerical, not architectural:
+
+- `λ_syn` equilibrium, and variant A vs B (§6.5).
+- Ladder density: geometric vs dense integer grid (§4.3).
+- `m_sep` / `v₀` geometry scale.
+- κ and ω parameters (`α_prox`, `τ_prox`, `c_g`).
+- Anchor gain temperature `τ_gain`.
+- Separation form: margin (default) vs inverse-distance (alternatives in §6.2/6.4).
