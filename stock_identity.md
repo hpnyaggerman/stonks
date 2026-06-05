@@ -1,6 +1,6 @@
 # Stock Identity Encoder — Specification
 
-**Status:** design spec v0.1. Standalone system; does not depend on or modify the v4 forecasting pipeline.
+**Status:** design spec v0.2 — implementation decisions pinned (§11). Standalone system living in `StockIdentityModel/` at the repo root; does not depend on or modify the v4 forecasting pipeline.
 
 ## 1. Goal
 
@@ -327,7 +327,7 @@ Because the embedding is relational by design, **inference requires contemporane
 2. After training, embed them across many windows.
 3. Check that (a) their across-window consistency matches the trained tickers' — persistence transfers to unseen tickers; and (b) given embeddings from one set of windows, each held-out ticker's embedding from a *different* set of windows finds itself as nearest neighbor — distinctiveness transfers.
 
-Training loss going down does not certify the goal; this test does.
+Training loss going down does not certify the goal; this test does. (Holdout selection and eval cadence are pinned in §11.)
 
 ## 9. Hyperparameters
 
@@ -370,3 +370,54 @@ Log from day one — tuning decisions are made against these, not against intuit
 - Anchor drift distribution `‖z̄_i − a_i‖`.
 - Agreement between embeddings of the same ticker under re-drawn partitions at a fixed window.
 - Held-out-ticker retrieval accuracy (§8) — the acceptance metric.
+
+## 11. Implementation decisions
+
+Settled choices for the build; the design above is unchanged by anything here.
+
+### 11.1 Location, framework, data source
+
+- Code lives in **`StockIdentityModel/`** at the repo root. PyTorch.
+- Candle source: **raw OHLCV from `TrainingData/indicators_data/raw/`**. The processed CSVs cannot serve as input — Stage 2 (`processor.py`) drops the raw `open/high/low/volume` columns this model needs.
+- No other touchpoint with the v4 pipeline.
+
+### 11.2 Optimizer & schedule
+
+AdamW (`β₁ = 0.9`, `β₂ = 0.98`, `ε = 1e−8`), peak LR `3e−4`, linear warmup 500–1000 steps, cosine decay to `1e−5`, global-norm gradient clip `1.0` (the synergy ratio, the squared hinges, and the ℓ1 anchor loss can all spike transiently). Weight decay `0.01`, excluding biases, LayerNorm parameters, and the final `d_model → D` projection — decay on that projection pushes against the variance floor `v₀` for no benefit. The warmup window deliberately overlaps the §6.8 normalizer burn-in, during which effective term weights are still mis-scaled. Anchor buffers `a_i` are not optimizer parameters; they update only through their §6.6 EMA rule.
+
+### 11.3 Holdout protocol (concretizes §8)
+
+- Pool = tickers with complete data across the full window span (survivors present from the beginning). Hold out **5% of that pool**, drawn uniformly with a fixed seed; the list is frozen into the artifact configuration. Log the pool size; if the pool is small (< ~100), floor the holdout at ~10 tickers so the retrieval statistic isn't anemic.
+- Exclusion is **total**: held-out tickers appear in no `U_w` — neither as observers nor as attention context. They first touch the model at acceptance time, embedded exactly as an unseen ticker would be.
+- Retrieval gallery = held-out embeddings ∪ the canonical training table (training tickers serve as distractors; a holdout-only gallery would be trivially easy).
+- Scope: this certifies induction onto long-history survivor-class tickers. Transfer to short-history names is not measured by this holdout.
+
+### 11.4 Training length & checkpoint selection
+
+No fixed step budget; the operator picks the checkpoint from the training graphs.
+
+- **Every step (free, already computed in the loss):** all §10 scalar series. Note the §6.8 normalization holds normalized terms near 1 by construction — the *raw* magnitudes are the convergence curves.
+- **Every ~200–500 steps:** run the held-out §8 consistency + retrieval protocol and the partition-redraw agreement check, and write a checkpoint — so every checkpoint carries its acceptance numbers. The deciding curve for checkpoint selection is the held-out metric, per §8's own doctrine that training loss certifies nothing.
+- **Checkpoints store full training state**: weights, optimizer state, §6.8 EMA normalizers, anchors, stratum queue positions, visit counters, RNG state. Visit counters are load-bearing — partition seeds are `(window id, visit counter)` (§4.3). Selection reads weights only; the shipped table is recomputed at export (§8).
+
+### 11.5 Pinned defaults
+
+Resolutions of details the design leaves open; two implementations following this list produce the same function.
+
+| Area | Decision |
+|---|---|
+| Window tiling | Anchored at the **newest** day, tiling backward; partial leftover at the oldest end discarded. Inference and the export table use the last `K_inf` windows, which must end at the latest data. |
+| Calendar | Global trading-day grid (union of ticker dates / benchmark calendar). A ticker is in `U_w` iff it has a bar on every grid day of the window. |
+| Zero/missing volume | Makes the window incomplete for that ticker (`log V/median` is undefined at `V = 0`). |
+| `q_clip` | Global, symmetric thresholds (quantiles `q` and `1−q` of all training-period log-returns), computed once, frozen, shipped in the normalization spec. |
+| Strata | Equal window counts (±1). |
+| Transformer details | Pre-norm blocks; learned positional embedding over day slots; the summary token carries no position; the context module reuses `d_model`, `n_h`. |
+| Peer view residual | "Entry residual is cut" = **block 1 only**; block 2's observer input is already a pure peer aggregate, so its residual is clean. |
+| Peer view query | The observer's own summary still forms the attention **query** over peers — weights may depend on the observer, values never contain it. That is the relational route working as intended. |
+| Observer dropout edge | If a draw leaves an observer zero visible peers, redraw the mask. |
+| Shared-context approximation | One masked everyone-attends-everyone pass produces all tickers' block outputs; the observer's rows are recomputed with self masked and the block-1 residual cut, reusing peers' vectors from the shared pass. |
+| `I_i` (per-ticker, §6.6) | Ticker `i`'s own summands of `L_sc(full) + L_tc(full)` this step. |
+| EMA normalizers | Initialize to the term's first-step value (step 1 normalizes to exactly 1); update *after* the normalized loss is computed, using the previous step's EMA. |
+| Anchor init | `a_i` ← the ticker's first `z̄_i`; `Δ_i` enters `L_anc` from the ticker's second eligible step. `τ_gain` uses the same `β` as §6.8. |
+| Statistics | Population variances throughout; `L_psep` averages over ordered (observer, peer) pairs. |
+| `embed()` | Returns only the target's row; peers' perturbed vectors from the joint pass are discarded. |
