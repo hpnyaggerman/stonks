@@ -1,0 +1,5 @@
+# Separate environment from the v4 pipeline (which pins TF 2.10).
+# CPU install: pip install --index-url https://download.pytorch.org/whl/cpu torch && pip install pandas
+torch>=2.1
+pandas>=2.0
+numpy>=1.24

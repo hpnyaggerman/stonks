@@ -1,0 +1,131 @@
+# Stock Identity Encoder
+
+Learns, from raw daily OHLCV candles alone, a 32-dimensional **identity embedding** per
+stock — a vector capturing a quality of the stock that is stable in time and distinguishes
+it from other stocks:
+
+- **Persistent** — the same ticker gets (nearly) the same vector regardless of which time
+  window, peer group, group size, or dropout draw produced it.
+- **Distinctive** — different tickers get vectors far apart.
+- **Two-route** — the vector is derivable from the ticker's own price behavior alone
+  (self view) and from its relations to other tickers alone (peer view), and the combined
+  computation (full view) is trained to beat both routes.
+- **Inductive** — no per-ticker parameters: any ticker with enough candle history plus a
+  set of context tickers can be embedded at inference, including tickers never seen in
+  training.
+
+One pass, end to end: candles are normalized per ticker per window (price level and volume
+scale removed, shape of moves kept); a 2-layer transformer summarizes each ticker's window
+into one vector; attention blocks over randomly drawn peer groups — at several group sizes,
+under the three views — produce the embedding; the loss demands consistency across
+windows/scales/groupings, margin separation between tickers, full-view synergy over the
+masked views, anchor stability across training, and per-dimension utilization
+(anti-collapse). Ticker identity and calendar position never enter the model, which is
+what makes it inductive by construction.
+
+Standalone PyTorch system; no touchpoint with the v4 forecasting pipeline. Input = raw
+OHLCV candles from `TrainingData/indicators_data/raw/` (the processed CSVs drop the raw
+columns this model needs).
+
+## Environment
+
+The v4 pipeline pins TF 2.10; this model needs its own environment:
+
+```bash
+python3 -m venv ~/venvs/stockid
+~/venvs/stockid/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+~/venvs/stockid/bin/pip install pandas
+```
+
+## Commands (from the repo root)
+
+```bash
+# Train (writes runs/<name>/{config.json, data_meta.json, train_log.jsonl, eval_log.jsonl, latest.pt, best.pt})
+python -m StockIdentityModel.train --run-dir StockIdentityModel/runs/r1
+
+# Export the artifact from a chosen checkpoint (picked off the eval curves)
+python -m StockIdentityModel.export --checkpoint StockIdentityModel/runs/r1/best.pt \
+    --out StockIdentityModel/artifacts/v1
+
+# Embed any ticker (including ones never seen in training)
+python -m StockIdentityModel.inference --artifact StockIdentityModel/artifacts/v1 --ticker AMD
+```
+
+## GPU
+
+Device is `auto` (CUDA when available); override with `--device cpu|cuda|cuda:N` on every CLI.
+On a GPU box install the CUDA build (`pip install torch` — the default Linux wheel ships CUDA)
+instead of the `+cpu` wheel above. Recommended on a 24 GB card:
+
+```bash
+python -m StockIdentityModel.train --run-dir StockIdentityModel/runs/r1 --no-grad-checkpoint
+```
+
+(`grad_checkpoint` exists to fit the ~3 GB of temporal-encoder activations into small-RAM CPU
+boxes; with VRAM headroom, disabling it removes the recompute and is faster.) TF32 matmuls are
+enabled automatically on CUDA. The model is ~1M parameters — one GPU per run; use a second GPU
+for a parallel run (different seed / `lambda_syn`) via `CUDA_VISIBLE_DEVICES=1`. Multi-GPU
+training of a single run is not supported: a step's loss couples all windows/scales globally
+(synergy, utilization, anchors), and the model is far too small to justify sharding it.
+
+Checkpoints and artifacts are machine-portable (loaded via `map_location`, artifact weights
+saved on CPU): train on GPU, export/infer anywhere. Caveat: bit-exact `--resume` replay is a
+CPU property; on CUDA, scatter/`index_add` use non-deterministic atomics, so resumed curves can
+diverge at floating-point noise level (distributional state — anchors, EMA normalizers, queues —
+is restored exactly).
+
+`best.pt` tracks the highest held-out retrieval accuracy — the acceptance metric: tickers held
+out of training entirely must stay consistent across windows and find themselves by nearest
+neighbor against the trained gallery. `latest.pt` is written at every eval. Both store full
+training state and are valid `--resume` targets.
+
+## File map
+
+| File | Responsibility |
+|---|---|
+| `config.py` | hyperparameters, paths, optimizer knobs |
+| `data.py` | trading-day grid, window tiling, candle normalization + clip thresholds, holdout split |
+| `sampling.py` | stratified window sampling, seeded group partitions |
+| `model.py` | temporal encoder, three-view context module |
+| `losses.py` | loss terms, anchor buffers, EMA loss normalizers |
+| `train.py` | training step, observer dropout, LR schedule, checkpoints |
+| `evaluate.py` | held-out consistency + retrieval, partition-redraw agreement |
+| `export.py` | artifact: weights + context recipe + canonical embedding table |
+| `inference.py` | `embed()` for arbitrary tickers from an artifact |
+
+## Design notes
+
+- **Calendar** = SPY trading days (the benchmark grid is immune to rogue dates in any single
+  ticker's file). `calendar="union"` switches to the union of all tickers' dates.
+- **Context trust in temporal consistency**: the weight ω(g) = (g−1)/(g−1+c_g) discounts
+  embeddings computed with few peers (a thin context is noisy sampling, not signal). Group
+  sizes differ across windows at the same scale because the universe grows over time, so each
+  same-ticker window pair is weighted by ω(min(g, g′)) — a pair is trusted no more than its
+  thinner context, and the weight reduces to a single per-scale ω whenever sizes match.
+- **FF dropout masks** are drawn once per (window, scale) per token and reused across the
+  three views — like the observer-dropout masks — so view differences are attributable to
+  withheld evidence, not noise. Fresh draws per (window, scale) keep the self view varying
+  across scales only through dropout, which is what lets scale consistency on the self view
+  penalize dropout sensitivity.
+- **Pre-norm stacks** end with a final LayerNorm before each output head (standard for
+  pre-norm). FF width `d_ff = 4·d_model = 512`, GELU.
+- **Weight decay** excludes biases, LayerNorm parameters, and the final `d_model → D`
+  projection (decay there pushes against the variance floor `v0` for no benefit); everything
+  else — including the positional embedding — decays.
+- **Eval-time retrieval gallery** during training uses trained tickers' window-set-B means as
+  the distractor table (same protocol as the holdout keys). The exported acceptance numbers
+  use the canonical table itself.
+- **Clip-threshold pool**: quantiles are computed over the four price log-return features of
+  training tickers only (holdout exclusion is total), pooled across all windows, then frozen
+  into the artifact.
+- If a step draws the same window twice (possible at a queue refill boundary), the two draws
+  occupy distinct slots with fresh partitions; the proximity weight κ — which up-weights
+  same-ticker pairs from windows close in time — sees a window distance of 0 for that pair.
+
+## Sizing on this repo's data
+
+347 tickers on the 1999-11-01 → 2026-04-23 SPY grid → 104 windows of 64 days; survivor pool
+43 → holdout floored at 10. Universe per window grows 39 → 295; ladders span {1,2,4} (early)
+to {1…32} (late). A training step (M·W = 8 windows, 3 views, exact peer view at g ≤ 64) takes
+~10–30 s on a 4-core CPU; `grad_checkpoint=True` keeps peak RAM in budget by recomputing the
+temporal encoder during backward.
