@@ -319,7 +319,7 @@ def _lambda_of(cfg: Config, name: str) -> float:
 
 
 def _fixed_scale(cfg: Config, name: str) -> float | None:
-    """Fixed normalization scale for the bounded hinge terms; None for the rest.
+    """Fixed normalization scale; None -> the term uses the EMA(+floor) path.
 
     The separation hinges live in [0, m_sep^2] and utilization in [0, ~v0+lambda_cov];
     dividing by the ceiling keeps their gradients at a constant scale whether the
@@ -327,20 +327,32 @@ def _fixed_scale(cfg: Config, name: str) -> float | None:
     is exactly what neutered them in the r1 collapse: a saturated term's normalized
     value pins at 1 (bounded force) while the shrinking consistency terms' EMA
     denominators -> 0 amplified the contraction without bound.
+
+    The anchor term is l1, and an l1 gradient's norm is independent of the residual
+    size — under EMA self-normalization its force grows as 1/L_anc as the anchors
+    converge, a contraction ratchet (run r2: force_anc rose 13x and dominated every
+    other term while the population ground down to ~1e-4 of the variance floor).
+    Its natural unit is the geometry scale sqrt(v0): per-dim mean absolute drift
+    measured against the per-dim target std. Only genuinely quadratic shrinking
+    terms (sc/tc) and the scale-invariant ratio (syn) stay on the EMA path, where
+    gradient norm vanishes with the term and the floor caps transient amplification.
     """
     base = name.split("_")[0]
     if base in ("xsep", "psep"):
         return cfg.resolved_m_sep() ** 2
     if base == "util":
         return cfg.v0 + cfg.lambda_cov
+    if base == "anc":
+        return cfg.v0 ** 0.5
     return None
 
 
 class EmaNormalizer:
     """Scale normalization for the loss terms.
 
-    Bounded hinge terms (xsep/psep/util) are divided by their fixed ceilings
-    (_fixed_scale). The shrinking terms (sc/tc/anc/syn) are divided by a frozen
+    Fixed-scale terms (xsep/psep/util/anc) are divided by constants
+    (_fixed_scale). The quadratic shrinking terms (sc/tc) and the
+    scale-invariant ratio (syn) are divided by a frozen
     running average of their own magnitude, with the denominator floored at
     kappa_floor x the term's first-step value: the lambdas stay relative
     priorities as raw magnitudes drift, but a term approaching zero amplifies

@@ -100,7 +100,9 @@ training state and are valid `--resume` targets.
   consistency term's normalized gradient grows as 1/√L as it shrinks while a saturated hinge's
   stays constant, making collapse a stable attractor. Guards: (1) the bounded hinge terms
   (xsep/psep/util) are normalized by fixed ceilings (m_sep², v0+λ_cov) instead of their own
-  EMA; (2) the shrinking terms' EMA denominators are floored at `kappa_floor` (0.01) × their
+  EMA, and the ℓ1 anchor by the geometry unit √v0 — an ℓ1 gradient's norm doesn't shrink
+  with its value, so EMA-normalizing it is a contraction ratchet (run r2); (2) the quadratic
+  terms' (sc/tc) and syn's EMA denominators are floored at `kappa_floor` (0.01) × their
   first-step value, capping gradient self-amplification at 100×; (3) fresh runs rescale the
   final projection at init so per-dim var(z̄) starts at v0 (`calibrate_init`) — hinges begin
   satisfied, as fences rather than springs.
