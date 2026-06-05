@@ -307,51 +307,118 @@ class AnchorState:
         self.tau_gain = st["tau_gain"]
 
 
-class EmaNormalizer:
-    """Each loss term divided by a frozen running average of its own magnitude, so the
-    lambda weights stay pure relative priorities as raw magnitudes shrink over training.
+def _lambda_of(cfg: Config, name: str) -> float:
+    """Total lambda multiplying a term's normalized value in the combined loss."""
+    flat = {"syn": cfg.lambda_syn, "anc": cfg.lambda_anc, "util": cfg.lambda_util}
+    if name in flat:
+        return flat[name]
+    t, v = name.rsplit("_", 1)
+    lam_view = {"full": cfg.lambda_full, "self": cfg.lambda_self, "peer": cfg.lambda_peer}
+    lam_term = {"sc": cfg.lambda_sc, "tc": cfg.lambda_tc, "xsep": cfg.lambda_xsep, "psep": cfg.lambda_psep}
+    return lam_view[v] * lam_term[t]
 
-    Init to the term's first-step value (step 1 normalizes to exactly 1); the EMA
-    updates after the normalized loss is computed, using the previous step's EMA.
+
+def _fixed_scale(cfg: Config, name: str) -> float | None:
+    """Fixed normalization scale for the bounded hinge terms; None for the rest.
+
+    The separation hinges live in [0, m_sep^2] and utilization in [0, ~v0+lambda_cov];
+    dividing by the ceiling keeps their gradients at a constant scale whether the
+    constraint is satisfied or maximally violated. Normalizing them by their own EMA
+    is exactly what neutered them in the r1 collapse: a saturated term's normalized
+    value pins at 1 (bounded force) while the shrinking consistency terms' EMA
+    denominators -> 0 amplified the contraction without bound.
+    """
+    base = name.split("_")[0]
+    if base in ("xsep", "psep"):
+        return cfg.resolved_m_sep() ** 2
+    if base == "util":
+        return cfg.v0 + cfg.lambda_cov
+    return None
+
+
+class EmaNormalizer:
+    """Scale normalization for the loss terms.
+
+    Bounded hinge terms (xsep/psep/util) are divided by their fixed ceilings
+    (_fixed_scale). The shrinking terms (sc/tc/anc/syn) are divided by a frozen
+    running average of their own magnitude, with the denominator floored at
+    kappa_floor x the term's first-step value: the lambdas stay relative
+    priorities as raw magnitudes drift, but a term approaching zero amplifies
+    its gradient at most 1/kappa_floor x. Without the floor, a quadratic
+    consistency term's normalized gradient grows as 1/sqrt(L) as L -> 0 and
+    total collapse is a stable attractor (run r1).
+
+    EMA init = the term's first-step value (step 1 normalizes to exactly 1);
+    the EMA updates after the normalized loss is computed, using the previous
+    step's EMA.
     """
 
-    def __init__(self, beta: float, eps: float):
-        self.beta, self.eps = beta, eps
+    def __init__(self, beta: float, eps: float, kappa_floor: float = 0.0):
+        self.beta, self.eps, self.kappa_floor = beta, eps, kappa_floor
         self.ema: dict[str, float] = {}
+        self.first: dict[str, float] = {}
+        self.last_denom: dict[str, float] = {}  # diagnostics only; not checkpoint state
 
-    def normalize(self, name: str, raw: torch.Tensor) -> torch.Tensor:
-        prev = self.ema.get(name, float(raw.detach()))
-        normalized = raw / (prev + self.eps)
-        self.ema[name] = self.beta * prev + (1 - self.beta) * float(raw.detach()) if name in self.ema else float(raw.detach())
-        return normalized
+    def normalize(self, name: str, raw: torch.Tensor, fixed_scale: float | None = None) -> torch.Tensor:
+        if fixed_scale is not None:
+            self.last_denom[name] = fixed_scale
+            return raw / fixed_scale
+        r = float(raw.detach())
+        prev = self.ema.get(name, r)
+        first = self.first.setdefault(name, r)
+        denom = max(prev, self.kappa_floor * first) + self.eps
+        self.last_denom[name] = denom
+        self.ema[name] = self.beta * prev + (1 - self.beta) * r if name in self.ema else r
+        return raw / denom
 
     def state_dict(self) -> dict:
-        return dict(self.ema)
+        return {"ema": dict(self.ema), "first": dict(self.first)}
 
     def load_state_dict(self, st: dict) -> None:
-        self.ema = dict(st)
+        if isinstance(st.get("ema"), dict):
+            self.ema = dict(st["ema"])
+            self.first = dict(st.get("first") or st["ema"])
+        else:  # legacy flat {name: ema} checkpoints (pre-floor)
+            self.ema = dict(st)
+            self.first = dict(st)
 
 
 def combine(cfg: Config, terms: dict, norm: EmaNormalizer):
     """Normalized weighted sum of all loss terms. Absent terms are skipped."""
-    lam_view = {"full": cfg.lambda_full, "self": cfg.lambda_self, "peer": cfg.lambda_peer}
-    lam_term = {"sc": cfg.lambda_sc, "tc": cfg.lambda_tc, "xsep": cfg.lambda_xsep, "psep": cfg.lambda_psep}
     total = None
     normalized_log = {}
-    for v in VIEWS:
-        for t in ("sc", "tc", "xsep", "psep"):
-            raw = terms.get(f"{t}_{v}")
-            if raw is None:
-                continue
-            n = norm.normalize(f"{t}_{v}", raw)
-            normalized_log[f"{t}_{v}"] = float(n.detach())
-            contrib = lam_view[v] * lam_term[t] * n
-            total = contrib if total is None else total + contrib
-    for name, lam in (("syn", cfg.lambda_syn), ("anc", cfg.lambda_anc), ("util", cfg.lambda_util)):
-        raw = terms.get(name)
+    for name, raw in terms.items():
         if raw is None:
             continue
-        n = norm.normalize(name, raw)
+        n = norm.normalize(name, raw, _fixed_scale(cfg, name))
         normalized_log[name] = float(n.detach())
-        total = lam * n if total is None else total + lam * n
+        contrib = _lambda_of(cfg, name) * n
+        total = contrib if total is None else total + contrib
     return total, normalized_log
+
+
+def grad_force_diag(cfg: Config, terms: dict, norm: EmaNormalizer, B: StepBatch, total: torch.Tensor) -> dict:
+    """Per-term effective force on the step's embeddings:
+    lambda_k * ||d raw_k / d z|| / denom_k, plus the net ||d total / d z||.
+
+    Reads the contraction (sc/tc/anc) vs expansion (xsep/psep/util) balance
+    directly — the r1 collapse was invisible in term values but obvious in
+    these. Must run BEFORE total.backward(): the graph is still needed.
+    """
+    zs = [B.z[v] for v in VIEWS]
+    out: dict[str, float] = {}
+    for name, raw in terms.items():
+        if raw is None:
+            continue
+        gs = torch.autograd.grad(raw, zs, retain_graph=True, allow_unused=True)
+        g2 = None
+        for g in gs:
+            if g is not None:
+                g2 = (g ** 2).sum() if g2 is None else g2 + (g ** 2).sum()
+        if g2 is None:
+            continue
+        out[name] = float(_lambda_of(cfg, name) * torch.sqrt(g2) / norm.last_denom.get(name, 1.0))
+    gs = torch.autograd.grad(total, zs, retain_graph=True, allow_unused=True)
+    g2 = sum((g ** 2).sum() for g in gs if g is not None)
+    out["total"] = float(torch.sqrt(g2))
+    return out

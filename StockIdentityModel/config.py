@@ -44,6 +44,9 @@ class Config:
     eta0: float = 0.05           # anchor base gain
     beta: float = 0.99           # EMA decay (loss normalizers and tau_gain)
     eps: float = 1e-6
+    kappa_floor: float = 0.01    # EMA-normalizer denominator floor, as a fraction of the term's
+                                 # first-step value: caps a shrinking term's gradient
+                                 # self-amplification at 1/kappa_floor (collapse guard, run r1)
     lambda_full: float = 1.0
     lambda_self: float = 0.5
     lambda_peer: float = 0.5
@@ -77,6 +80,10 @@ class Config:
     eval_windows: int = 16       # windows used by the held-out consistency/retrieval protocol
     eval_redraws: int = 5        # partition-redraw agreement samples
     K_inf: int = 4               # windows averaged at inference
+    calibrate_init: bool = True  # fresh runs: rescale the final projection so per-dim var(z-bar)
+                                 # starts at v0 — hinges begin satisfied (fences, not springs)
+    grad_diag_every: int = 250   # cadence (steps) of per-term gradient-force diagnostics
+                                 # in train_log; 0 disables
     grad_checkpoint: bool = True # recompute temporal encoder in backward (CPU RAM)
     device: str = "auto"         # "auto" -> cuda if available, else cpu; or "cpu" / "cuda" / "cuda:N"
     num_threads: int = 4

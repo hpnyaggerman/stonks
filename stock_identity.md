@@ -1,6 +1,6 @@
 # Stock Identity Encoder — Specification
 
-**Status:** design spec v0.2 — implementation decisions pinned (§11). Standalone system living in `StockIdentityModel/` at the repo root; does not depend on or modify the v4 forecasting pipeline.
+**Status:** design spec v0.3 — implementation decisions pinned (§11); collapse guards added after run r1 collapsed (§6.8 normalization split, §11.6). Standalone system living in `StockIdentityModel/` at the repo root; does not depend on or modify the v4 forecasting pipeline.
 
 ## 1. Goal
 
@@ -278,7 +278,14 @@ This is also the anti-collapse backstop: the cheapest global solution to the con
 L = Σ_v λ_v · L_bundle(v)  +  λ_syn·L_syn  +  λ_anc·L_anc  +  λ_util·L_util
 ```
 
-Before weighting, each term is divided by a frozen running average of its own magnitude: `L̂_k = L_k / sg(EMA_β[L_k] + ε)`. As any term's raw size shrinks over training, its normalized value stays near 1, so the λ's remain pure relative priorities throughout. Principal tuning knob: `λ_syn` (sets the masked↔full equilibrium). The geometry's scale is set jointly by `m_sep` and `v₀`.
+Before weighting, each term is normalized — by **two different rules**:
+
+- **Bounded hinge terms** (`L_xsep`, `L_psep`, `L_util`) are divided by their fixed ceilings: `m_sep²` for the separations, `v₀ + λ_cov` for utilization. Their gradients keep a constant scale whether the constraint is satisfied or maximally violated.
+- **Shrinking terms** (`L_sc`, `L_tc`, `L_anc`, `L_syn`) are divided by a frozen running average of their own magnitude, floored: `L̂_k = L_k / sg(max(EMA_β[L_k], κ_floor·L_k⁽¹⁾) + ε)`, where `L_k⁽¹⁾` is the term's first-step value. The λ's stay relative priorities as raw magnitudes drift, but a term approaching zero can amplify its own gradient at most `1/κ_floor`.
+
+*Why the split (post-mortem of run r1, which collapsed totally).* Normalizing every term by its own EMA equalizes **values** — everything reads ≈ 1 — but not **gradients**. A quadratic consistency term's normalized gradient grows as `1/√L` as it shrinks, while a saturated hinge's stays constant; total collapse (every ticker at one point, separations pinned at their ceiling, utilization at maximum violation) is then a *stable attractor*: the better consistency gets, the harder it pulls, and the §6.7 backstop is outgunned without bound. The fixed hinge scales remove the saturation blindness; the floor turns the `1/√L` runaway into a force that *vanishes* at collapse (constant denominator ⇒ gradient ∝ √L); init calibration (§11.6) starts the geometry feasible so the contest never begins.
+
+Principal tuning knob: `λ_syn` (sets the masked↔full equilibrium). The geometry's scale is set jointly by `m_sep` and `v₀`.
 
 ## 7. Training step
 
@@ -351,6 +358,7 @@ Training loss going down does not certify the goal; this test does. (Holdout sel
 | `λ_cov` | decorrelation weight inside L_util | 1.0 |
 | `η₀`, `τ_gain` | anchor base gain, gain temperature | 0.05, running mean of I_i |
 | `β` | decay of the running-magnitude averages (§6.8) | 0.99 |
+| `κ_floor` | EMA-denominator floor, as a fraction of the term's first-step value (§6.8) | 0.01 |
 | `ε` | numerical safety constant | 1e−6 |
 | `λ_full / λ_self / λ_peer` | view weights | 1.0 / 0.5 / 0.5 |
 | `λ_sc, λ_tc, λ_xsep, λ_psep, λ_anc, λ_util` | term priorities | 1.0 each |
@@ -365,8 +373,9 @@ Training loss going down does not certify the goal; this test does. (Holdout sel
 Log from day one — tuning decisions are made against these, not against intuition:
 
 - Per-term magnitudes, raw and normalized.
+- Per-term effective gradient force on the step's embeddings, `λ_k·‖∂L_k/∂z‖/denom_k`, plus the normalizer denominators (cadence `grad_diag_every`). Values alone hide collapse — the r1 failure was invisible in normalized terms (all ≈ 1) and obvious in forces; the contraction (sc/tc/anc) vs expansion (xsep/psep/util) balance must be read in gradient units.
 - `I_full`, `I_self`, `I_peer` trajectories (synergy health; guides `λ_syn` and the masked-view weights, §6.5).
-- Per-dimension variance spectrum of `{μ_i}` (collapse watch).
+- Per-dimension variance spectrum of `{μ_i}` (collapse watch), and mean/min pairwise distance of the step's `{z̄_i}` population every step.
 - Anchor drift distribution `‖z̄_i − a_i‖`.
 - Agreement between embeddings of the same ticker under re-drawn partitions at a fixed window.
 - Held-out-ticker retrieval accuracy (§8) — the acceptance metric.
@@ -421,3 +430,11 @@ Resolutions of details the design leaves open; two implementations following thi
 | Anchor init | `a_i` ← the ticker's first `z̄_i`; `Δ_i` enters `L_anc` from the ticker's second eligible step. `τ_gain` uses the same `β` as §6.8. |
 | Statistics | Population variances throughout; `L_psep` averages over ordered (observer, peer) pairs. |
 | `embed()` | Returns only the target's row; peers' perturbed vectors from the joint pass are discarded. |
+
+### 11.6 Collapse guards (post-r1)
+
+Run r1 (first full training) collapsed totally by ~step 800: every readout matched the degenerate closed forms (`L_psep → m_sep² = 8`, `L_util → (√v₀−√ε)² = 0.998001`, per-dim variance ~1e−9, held-out retrieval 0/10 flat). Mechanism in §6.8. Guards, all in code:
+
+- **Normalization split + floor** — §6.8's two rules. `κ_floor = 0.01` caps any shrinking term's gradient self-amplification at 100× its step-1 calibration.
+- **Init calibration** (`calibrate_init`, fresh runs only) — before the optimizer is built, rescale the final `d_model → D` projection per dimension so the population variance of `z̄` — measured through the inference geometry (full view, single group, last `K_inf` windows) — starts at `v₀`. Hinges begin satisfied and act as fences; uncalibrated init sits ~2–4 orders of magnitude inside the violation region (r1: per-dim var 1e−4…7e−3 vs `v₀ = 1`) and the contraction wins the opening race.
+- **Force diagnostics** (`grad_diag_every`, default 250) — the train log records per-term `λ_k·‖∂L_k/∂z‖/denom_k` (`force`) and the live denominators (`denom`); every step records mean/min pairwise distance of the `z̄` population (`zbar_dist`). The acceptance doctrine extends: term values certify nothing about force balance — read the forces.

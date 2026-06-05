@@ -40,7 +40,7 @@ python3 -m venv ~/venvs/stockid
 ## Commands (from the repo root)
 
 ```bash
-# Train (writes runs/<name>/{config.json, data_meta.json, train_log.jsonl, eval_log.jsonl, latest.pt, best.pt})
+# Train (writes runs/<name>/{config.json, data_meta.json, calibration.json, train_log.jsonl, eval_log.jsonl, latest.pt, best.pt})
 python -m StockIdentityModel.train --run-dir StockIdentityModel/runs/r1
 
 # Export the artifact from a chosen checkpoint (picked off the eval curves)
@@ -95,6 +95,19 @@ training state and are valid `--resume` targets.
 
 ## Design notes
 
+- **Collapse guards** (post-r1, which collapsed totally — every ticker at one point, retrieval
+  0/10): per-term EMA normalization equalizes loss *values*, not *gradients* — a quadratic
+  consistency term's normalized gradient grows as 1/√L as it shrinks while a saturated hinge's
+  stays constant, making collapse a stable attractor. Guards: (1) the bounded hinge terms
+  (xsep/psep/util) are normalized by fixed ceilings (m_sep², v0+λ_cov) instead of their own
+  EMA; (2) the shrinking terms' EMA denominators are floored at `kappa_floor` (0.01) × their
+  first-step value, capping gradient self-amplification at 100×; (3) fresh runs rescale the
+  final projection at init so per-dim var(z̄) starts at v0 (`calibrate_init`) — hinges begin
+  satisfied, as fences rather than springs.
+- **Force diagnostics**: every `grad_diag_every` steps (default 250) the train log records
+  per-term λ·‖∂L/∂z‖/denom (`force`) and the live normalizer denominators (`denom`); every
+  step records mean/min pairwise distance of the z̄ population (`zbar_dist`). Collapse is
+  read in gradient units, not term values.
 - **Calendar** = SPY trading days (the benchmark grid is immune to rogue dates in any single
   ticker's file). `calendar="union"` switches to the union of all tickers' dates.
 - **Context trust in temporal consistency**: the weight ω(g) = (g−1)/(g−1+c_g) discounts

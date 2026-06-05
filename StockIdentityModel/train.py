@@ -17,7 +17,7 @@ import torch
 from .config import Config, REPO_ROOT
 from .data import StockData, ladder
 from .evaluate import run_eval
-from .losses import AnchorState, EmaNormalizer, StepIndex, StepStore, combine, step_losses
+from .losses import AnchorState, EmaNormalizer, StepIndex, StepStore, combine, grad_force_diag, step_losses
 from .model import IdentityEncoder
 from .sampling import StratumSampler, draw_partitions
 
@@ -47,6 +47,40 @@ def lr_at(step: int, cfg: Config) -> float:
         return cfg.lr_peak * step / cfg.warmup_steps
     t = min(1.0, max(0.0, (step - cfg.warmup_steps) / max(1, cfg.max_steps - cfg.warmup_steps)))
     return cfg.lr_min + (cfg.lr_peak - cfg.lr_min) * 0.5 * (1.0 + math.cos(math.pi * t))
+
+
+@torch.no_grad()
+def calibrate_output_scale(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
+    """Rescale the final d_model -> D projection, per dimension, so the population
+    variance of z-bar — measured through the inference geometry (full view, single
+    group, last K_inf windows) — starts at the v0 floor.
+
+    Starts the geometry feasible: the separation/utilization hinges begin satisfied
+    and act as fences. Without this, the init spread sits ~2 orders of magnitude
+    inside the violation region (r1: var_dim ~0.005 vs v0 = 1) and the consistency
+    terms' contraction wins the opening race."""
+    model.eval()
+    dev = next(model.parameters()).device
+    wins = ds.usable_windows[-cfg.K_inf:]
+    acc: dict[int, list[torch.Tensor]] = {}
+    for w in wins:
+        uni = ds.train_universe(w)
+        H = model.temporal(torch.from_numpy(ds.feats[uni, w]).to(dev))
+        Z = model.embed_rows(H)
+        for k, t in enumerate(uni):
+            acc.setdefault(int(t), []).append(Z[k])
+    zbar = torch.stack([torch.stack(v).mean(0) for v in acc.values()])
+    v_d = zbar.var(dim=0, unbiased=False)
+    s = torch.sqrt(cfg.v0 / torch.clamp(v_d, min=1e-12)).clamp(max=1e3)
+    model.context.out.weight.data.mul_(s[:, None])
+    model.context.out.bias.data.mul_(s)
+    v, sc = v_d.cpu().numpy(), s.cpu().numpy()
+    return {
+        "tickers": len(acc),
+        "windows": [int(w) for w in wins],
+        "var_before": {"min": float(v.min()), "med": float(np.median(v)), "max": float(v.max())},
+        "scale_applied": {"min": float(sc.min()), "med": float(np.median(sc)), "max": float(sc.max())},
+    }
 
 
 def draw_observer_dropout(real: torch.Tensor, p_attn: float) -> torch.Tensor:
@@ -173,9 +207,13 @@ def train(cfg: Config, resume: str | None = None) -> Path:
     (run_dir / "data_meta.json").write_text(json.dumps(meta, indent=2))
 
     model = IdentityEncoder(cfg).to(dev)
+    if cfg.calibrate_init and not resume:
+        calib = calibrate_output_scale(model, ds, cfg)
+        (run_dir / "calibration.json").write_text(json.dumps(calib, indent=2))
+        print(f"[calibrate] {json.dumps(calib)}")
     opt = build_optimizer(model, cfg)
     anchors = AnchorState(ds.T, cfg.D, cfg, device=dev)
-    norm = EmaNormalizer(cfg.beta, cfg.eps)
+    norm = EmaNormalizer(cfg.beta, cfg.eps, cfg.kappa_floor)
     sampler = StratumSampler(ds.usable_windows, cfg.M, cfg.W, np.random.default_rng(cfg.train_seed))
 
     start_step = 0
@@ -198,6 +236,9 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         total, normalized = combine(cfg, terms, norm)
         if total is None:
             raise RuntimeError(f"no loss term computable at step {step} (windows {draws})")
+        force = None
+        if cfg.grad_diag_every and step % cfg.grad_diag_every == 0:
+            force = grad_force_diag(cfg, terms, norm, batch, total)  # before backward: needs the graph
 
         lr = lr_at(step, cfg)
         for g in opt.param_groups:
@@ -224,6 +265,13 @@ def train(cfg: Config, resume: str | None = None) -> Path:
             rec["var_dim"] = {"min": float(s.min()), "med": float(np.median(s)), "max": float(s.max())}
             if step % cfg.eval_every == 0:  # full collapse-watch spectrum, at eval cadence
                 rec["var_spectrum"] = [round(float(x), 6) for x in np.sort(s)]
+        with torch.no_grad():  # collapse watch: pairwise distances of the z-bar population
+            zd = torch.pdist(zbar)
+        if zd.numel():
+            rec["zbar_dist"] = {"mean": float(zd.mean()), "min": float(zd.min())}
+        if force is not None:
+            rec["force"] = force
+            rec["denom"] = {k: float(v) for k, v in norm.last_denom.items()}
         log_f.write(json.dumps(rec) + "\n")
         log_f.flush()
         if step % 10 == 0 or step == start_step + 1:
@@ -231,6 +279,7 @@ def train(cfg: Config, resume: str | None = None) -> Path:
                 f"step {step:5d} total={rec['total']:.3f} "
                 f"I_full={rec['I'].get('full', float('nan')):.4g} I_self={rec['I'].get('self', float('nan')):.4g} "
                 f"I_peer={rec['I'].get('peer', float('nan')):.4g} vmin={rec.get('var_dim', {}).get('min', float('nan')):.3g} "
+                f"dz={rec.get('zbar_dist', {}).get('mean', float('nan')):.3g} "
                 f"({rec['secs']}s)"
             )
 
