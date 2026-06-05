@@ -15,7 +15,7 @@ The embedding must satisfy four properties:
 | **Two-route** | The vector must be derivable from the ticker's own price behavior alone *and* from its relations to other tickers alone — and the combined computation must be more reliable than either route by itself. |
 | **Inductive** | The model contains no per-ticker parameters. Any ticker with enough candle history plus a set of context tickers can be embedded at inference — including tickers never seen during training. |
 
-The deliverable is a trained encoder (weights + configuration + an `embed()` recipe), not a lookup table. A table of embeddings for the training tickers falls out as a by-product (§6.6, §8).
+The deliverable is a trained encoder (weights + configuration + an `embed()` recipe), not a lookup table. A table of embeddings for the training tickers is produced at export through the same recipe (§8).
 
 > **Structural invariant.** Ticker identity and calendar position never enter the model. Identity is used only for loss bookkeeping and the training-only anchor buffer (§6.6). A window's position on the timeline is used only as a loss weight (κ, §6). This makes the model inductive by construction.
 
@@ -25,7 +25,7 @@ The deliverable is a trained encoder (weights + configuration + an `embed()` rec
 flowchart TD
     raw["Daily candles per ticker<br/>(open, high, low, close, volume)"]
     win["Timeline cut into non-overlapping<br/>N-day windows"]
-    sample["Training step: M windows drawn,<br/>one from each era of the timeline"]
+    sample["Training step: W windows drawn from each of<br/>the M eras of the timeline (M·W total)"]
     norm["Per-ticker normalization within window:<br/>price level and volume scale removed,<br/>shape of moves kept"]
     temp["Temporal encoder (2-layer transformer):<br/>one ticker's window → one summary vector"]
     grp["Tickers split into random equal-size groups,<br/>at several group sizes: one group = whole universe,<br/>down to groups of Y tickers"]
@@ -61,7 +61,7 @@ Tile the timeline into non-overlapping windows of `N` trading days. A ticker bel
 
 ### 4.2 Step sampling
 
-Split the window sequence into `M` contiguous strata. Each training step draws **one window per stratum**, so every step compares a ticker against itself across the full span of history.
+Split the window sequence into `M` contiguous strata. Each training step draws **`W` windows per stratum** (`M·W` windows total), so every step compares a ticker against itself across the full span of history.
 
 ```mermaid
 flowchart LR
@@ -71,20 +71,20 @@ flowchart LR
         sd["…"]
         sM["Stratum M<br/>(newest windows)"]
     end
-    step["One training step:<br/>M windows spanning the whole history"]
-    s1 -->|"1 window, drawn<br/>without replacement"| step
-    s2 -->|"1 window"| step
+    step["One training step:<br/>M·W windows spanning the whole history"]
+    s1 -->|"W windows, drawn<br/>without replacement"| step
+    s2 -->|"W windows"| step
     sd -->|"…"| step
-    sM -->|"1 window"| step
+    sM -->|"W windows"| step
 ```
 
-Draws are without replacement: each stratum keeps a shuffled queue and reshuffles only when the queue runs out. Consequences: no window is reused before all others in its stratum have been used, and since every stratum drains at one window per step, the whole timeline cycles nearly simultaneously.
+Draws are without replacement: each stratum keeps a shuffled queue and reshuffles only when the queue runs out. Consequences: no window is reused before all others in its stratum have been used, and since every stratum drains at `W` windows per step, the whole timeline cycles nearly simultaneously. With `W > 1`, some of a step's window pairs come from the same era; the proximity weight κ (§6) already weights close pairs, so no special handling is needed.
 
 ### 4.3 Grouping
 
 On each visit to a window, for each scale `s` in the ladder `𝒢`, draw a **fresh uniformly random partition** of `U_w` into `n_s` groups of equal size (±1), every group at least `Y` tickers.
 
-- Ladder default: geometric — `n_s ∈ {1, 2, 4, 8, …}`, capped so the smallest group still has `Y` tickers. Dense option: every integer group count from 1 to the cap.
+- Ladder: geometric — `n_s ∈ {1, 2, 4, 8, …}`, capped so the smallest group still has `Y` tickers. Doubling steps span the whole range from one universe-wide group down to `Y`-sized groups; consecutive integer counts would add near-identical contexts at full cost.
 - Partition randomness is seeded by `(window id, visit counter)`. With hundreds of tickers the number of possible partitions is astronomically large, so fresh seeded draws never repeat a grouping in practice — no bookkeeping needed.
 
 ### 4.4 Eligibility
@@ -144,7 +144,7 @@ flowchart LR
 
   With both leaks closed, the observer's own content reaches the output only as it is genuinely mirrored in how peers behave — exactly the relational signal this view isolates.
 
-  Cost: the exact peer view needs one pass per observer (`g` passes for a group of size `g`). Knob `g_exact`: exact below it; above it, a shared-context approximation is allowed (peers' vectors computed once with everyone present). The leak in the approximation shrinks as `1/g`, so approximating only large groups is safe.
+  Cost: the exact peer view needs one pass per observer (`g` passes for a group of size `g`). Groups up to `g_exact` use the exact computation; larger groups use a shared-context approximation (peers' vectors computed once with everyone present). The approximation's residual leak shrinks as `1/g`, confining it to exactly the regime where it is negligible.
 
 A final linear layer maps `d_model → D = 32`. The embedding space is not normalized to unit length; its scale is set by the utilization term (§6.7).
 
@@ -203,7 +203,7 @@ Pairs: ticker `i` at scale `s` against every other ticker `j ≠ i` at every oth
 L_xsep(v) = mean over pairs of  max(0, m_sep − d(μ_i^{s,v}, μ_j^{s',v}))²
 ```
 
-Different tickers must sit at least `m_sep` apart even when embedded under different group sizes. The penalty is zero once the margin is met — separation has a finish line, so this term cannot push the space apart indefinitely. (Alternative form, heavier tails, no finish line: `1/(mean pair distance + ε)`.)
+Different tickers must sit at least `m_sep` apart even when embedded under different group sizes. The penalty is zero once the margin is met — separation has a finish line, so this term cannot push the space apart indefinitely or fight the anchor and utilization terms at equilibrium.
 
 ### 6.3 Temporal consistency `L_tc(v)` — the core persistence demand
 
@@ -221,7 +221,7 @@ Within each group, at each (window, scale):
 L_psep(v) = mean over (w,s), observers i, peers j of  max(0, m_sep − d(z_i^{w,s,v}, z_j^{w,s,v}))²
 ```
 
-In any single window, in any group, a ticker must not blend into its peers. (Same alternative form as 6.2.)
+In any single window, in any group, a ticker must not blend into its peers.
 
 **Coverage.** 6.4 separates tickers within a window at one scale — and at scale 1 the "group" is the whole universe, so same-window global separation is included. 6.2 separates across scales. 6.1 + 6.3 collapse each ticker's set of embeddings toward a single point. Jointly: one tight point per ticker, all points at least `m_sep` apart, stable across time, scale, grouping, and dropout. Cross-window separation between *different* tickers follows from 6.3 + 6.4 combined and needs no term of its own.
 
@@ -242,12 +242,7 @@ L_syn = (P_self + P_peer) / (P_full + ε)
 
 The full view's inconsistency must be small relative to the harmonic mean of the masked views' inconsistencies. The harmonic mean hugs the smaller of its two inputs, so the bar automatically tracks whichever masked route is currently stronger. The ratio scales smoothly with how much better the full view is (no hard threshold), and multiplying all inconsistencies by a constant changes nothing — the term stays calibrated as losses shrink over training.
 
-The term can fall by improving the full view or by degrading the masked views; degradation is taxed by 6.1/6.3 applied to those views. This tension is intentional — the equilibrium is set by `λ_syn` against the masked views' bundle weights. Two variants:
-
-- **A (default):** training updates flow into numerator and denominator both — the designed tug-of-war.
-- **B:** masked inconsistencies are wrapped in `sg(·)` inside `L_syn` only, so synergy pressure can only improve the full view; masked quality is then governed solely by their own terms.
-
-The choice is empirical: log `I_full`, `I_self`, `I_peer` every step; if masked inconsistencies climb while their own weighted terms say they should not, switch A → B.
+The term can fall by improving the full view or by degrading the masked views; degradation is taxed by 6.1/6.3 applied to those views. This tension is intentional: training updates flow through numerator and denominator both, and the equilibrium is set by `λ_syn` against the masked views' bundle weights. The masked inconsistencies are deliberately **not** wrapped in `sg(·)`: with the denominator frozen, the term's gradient becomes a positive scalar times the gradient of `I_full` — extra weight on full-view consistency, a direction the full view's own bundle already supplies — and the coupling that forces the full view to outperform both routes disappears. If `I_self` or `I_peer` climbs during training, the correction is numerical (raise `λ_self`/`λ_peer` or lower `λ_syn`), not structural.
 
 ### 6.6 Anchor `L_anc`
 
@@ -261,7 +256,7 @@ a_i  ← (1 − η_i)·a_i + η_i·sg(z̄_i)                # exponential-moving
 L_anc = mean over eligible i of Δ_i
 ```
 
-The gain rule: when the model is currently consistent about ticker `i`, the fresh estimate is trustworthy and moves the anchor faster; when inconsistent, the anchor barely moves. Each ticker's representation settles into a fixed value across training, while that value keeps tracking current good estimates instead of freezing on stale history. At the end of training, `{a_i}` is a ready-made canonical embedding table for the training universe.
+The gain rule: when the model is currently consistent about ticker `i`, the fresh estimate is trustworthy and moves the anchor faster; when inconsistent, the anchor barely moves. Each ticker's representation settles into a fixed value across training, while that value keeps tracking current good estimates instead of freezing on stale history. The anchors are training state only; the embedding table shipped with the artifact is recomputed at export (§8).
 
 ### 6.7 Utilization `L_util`
 
@@ -286,7 +281,7 @@ Before weighting, each term is divided by a frozen running average of its own ma
 ## 7. Training step
 
 ```
-windows = [stratum_queue[k].pop() for k in 1..M]          # refill + reshuffle a queue only when empty
+windows = [stratum_queue[k].pop() for k in 1..M, W draws each]   # refill + reshuffle a queue only when empty
 for w in windows:
     U_w  = tickers complete in w
     H[w] = temporal_encoder(normalize(candles(w)))         # one summary vector per ticker
@@ -303,7 +298,7 @@ compute z̄_i; compute Δ_i; update anchors; add 6.6
 L = normalized weighted sum  →  backpropagate  →  optimizer step
 ```
 
-Sizing for this repo's data (~348 tickers, ~25 years of daily candles ≈ 98 windows at `N = 64`): `M = 4` windows per step, 6-scale geometric ladder. Full and self views cost one pass per (window, scale). The only heavy item is the exact peer view at the universe scale (348 passes over 348 tickers) — feasible on GPU, and capped by `g_exact` if needed. The anchor buffer is 348 × 32 floats — negligible.
+Sizing for this repo's data (~348 tickers, ~25 years of daily candles ≈ 98 windows at `N = 64`): `M·W = 4` windows per step (`M = 4`, `W = 1`), 6-scale geometric ladder. Full and self views cost one pass per (window, scale). The only heavy item is the exact peer view at the universe scale (348 passes over 348 tickers) — feasible on GPU, and capped by `g_exact` if needed. The anchor buffer is 348 × 32 floats — negligible.
 
 ## 8. Inference and artifact
 
@@ -322,7 +317,7 @@ Because the embedding is relational by design, **inference requires contemporane
 
 1. Encoder weights + configuration (`N`, `D`, ladder, normalization spec, universe ticker list).
 2. A context-fetch recipe (which tickers, which date ranges).
-3. A canonical embedding table for the training universe — either the final anchors `{a_i}` (training-history consensus) or freshly recomputed embeddings over recent windows (recommended; fresher).
+3. A canonical embedding table for the training universe, recomputed at export through the inference recipe above (last `K_inf` windows). Recomputed rather than copied from the anchors: the inference path is deterministic and identical to how unseen tickers are embedded, so training tickers and new tickers land in directly comparable coordinates.
 
 **Acceptance test** — the number this system stands on:
 
@@ -337,7 +332,8 @@ Training loss going down does not certify the goal; this test does.
 | Symbol | Meaning | Default |
 |---|---|---|
 | `N` | window length, trading days | 64 |
-| `M` | strata = windows per training step | 4 |
+| `M` | number of strata | 4 |
+| `W` | windows drawn per stratum per step | 1 |
 | `Y` | minimum group size | 8 |
 | `D` | embedding dimension | 32 |
 | — | temporal encoder depth | 2 layers |
@@ -364,22 +360,11 @@ Training loss going down does not certify the goal; this test does.
 
 ## 10. Instrumentation
 
-Log from day one — the open knobs are tuned against these, not against intuition:
+Log from day one — tuning decisions are made against these, not against intuition:
 
 - Per-term magnitudes, raw and normalized.
-- `I_full`, `I_self`, `I_peer` trajectories (synergy health; decides variant A vs B in §6.5).
+- `I_full`, `I_self`, `I_peer` trajectories (synergy health; guides `λ_syn` and the masked-view weights, §6.5).
 - Per-dimension variance spectrum of `{μ_i}` (collapse watch).
 - Anchor drift distribution `‖z̄_i − a_i‖`.
 - Agreement between embeddings of the same ticker under re-drawn partitions at a fixed window.
 - Held-out-ticker retrieval accuracy (§8) — the acceptance metric.
-
-## 11. Open knobs
-
-Numerical, not architectural:
-
-- `λ_syn` equilibrium, and variant A vs B (§6.5).
-- Ladder density: geometric vs dense integer grid (§4.3).
-- `m_sep` / `v₀` geometry scale.
-- κ and ω parameters (`α_prox`, `τ_prox`, `c_g`).
-- Anchor gain temperature `τ_gain`.
-- Separation form: margin (default) vs inverse-distance (alternatives in §6.2/6.4).
