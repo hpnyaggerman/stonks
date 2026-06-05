@@ -80,6 +80,8 @@ flowchart LR
 
 Draws are without replacement: each stratum keeps a shuffled queue and reshuffles only when the queue runs out. Consequences: no window is reused before all others in its stratum have been used, and since every stratum drains at `W` windows per step, the whole timeline cycles nearly simultaneously. With `W > 1`, some of a step's window pairs come from the same era; the proximity weight κ (§6) already weights close pairs, so no special handling is needed.
 
+`W = 2` (the default) also serves eligibility: with `W = 1`, a ticker whose entire history sits inside one stratum can appear in at most one of a step's windows and therefore never enters temporal consistency (§4.4, §6.3). Two draws per stratum make within-stratum pairs possible, so short-history tickers receive the persistence signal too.
+
 ### 4.3 Grouping
 
 On each visit to a window, for each scale `s` in the ladder `𝒢`, draw a **fresh uniformly random partition** of `U_w` into `n_s` groups of equal size (±1), every group at least `Y` tickers.
@@ -260,7 +262,7 @@ The gain rule: when the model is currently consistent about ticker `i`, the fres
 
 ### 6.7 Utilization `L_util`
 
-Over the step's population of full-view means `{μ_i}`: let `v_d` = variance of dimension `d` across tickers, and `ĉ` = the D×D correlation matrix across tickers.
+Over the step's population `{z̄_i}` — one point per eligible ticker, where `z̄_i` is the step's full-view mean over (w, s) exactly as defined in §6.6: let `v_d` = variance of dimension `d` across tickers, and `ĉ` = the D×D correlation matrix across tickers. (Pooled, not per-scale: a per-scale population would let a ticker's own across-scale scatter — the thing `L_sc` is driving to zero — count toward the variance floor, so the floor could be met in a fully collapsed state. One point per ticker makes the floor measure pure between-ticker spread, which is the collapse this backstop exists to outlaw.)
 
 ```
 L_var  = (1/D) · Σ_d  max(0, √v₀ − √(v_d + ε))²        # every dimension must vary across tickers by at least v₀
@@ -298,7 +300,7 @@ compute z̄_i; compute Δ_i; update anchors; add 6.6
 L = normalized weighted sum  →  backpropagate  →  optimizer step
 ```
 
-Sizing for this repo's data (~348 tickers, ~25 years of daily candles ≈ 98 windows at `N = 64`): `M·W = 4` windows per step (`M = 4`, `W = 1`), 6-scale geometric ladder. Full and self views cost one pass per (window, scale). The only heavy item is the exact peer view at the universe scale (348 passes over 348 tickers) — feasible on GPU, and capped by `g_exact` if needed. The anchor buffer is 348 × 32 floats — negligible.
+Sizing for this repo's data (~348 tickers, ~25 years of daily candles ≈ 98 windows at `N = 64`): `M·W = 8` windows per step (`M = 4`, `W = 2`), 6-scale geometric ladder. Full and self views cost one pass per (window, scale). The only heavy item is the exact peer view at the universe scale (348 passes over 348 tickers) — feasible on GPU, and capped by `g_exact` if needed. The anchor buffer is 348 × 32 floats — negligible.
 
 ## 8. Inference and artifact
 
@@ -333,7 +335,7 @@ Training loss going down does not certify the goal; this test does.
 |---|---|---|
 | `N` | window length, trading days | 64 |
 | `M` | number of strata | 4 |
-| `W` | windows drawn per stratum per step | 1 |
+| `W` | windows drawn per stratum per step | 2 |
 | `Y` | minimum group size | 8 |
 | `D` | embedding dimension | 32 |
 | — | temporal encoder depth | 2 layers |
