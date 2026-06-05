@@ -2,5 +2,5 @@ cache/
 forecasts/
 videos/
 sec-edgar-filings/
-config.json
+/config.json
 output_plots/_style_smoke/
