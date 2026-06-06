@@ -48,7 +48,7 @@ class Config:
     eta0: float = 0.05           # anchor base gain
     beta: float = 0.99           # EMA decay (loss normalizers and tau_gain)
     eps: float = 1e-6
-    kappa_floor: float = 0.01    # EMA-normalizer denominator floor, as a fraction of the term's
+    kappa_floor: float = 0.05    # EMA-normalizer denominator floor, as a fraction of the term's
                                  # first-step value: caps a shrinking term's gradient
                                  # self-amplification at 1/kappa_floor (collapse guard, run r1)
     lambda_full: float = 1.0
