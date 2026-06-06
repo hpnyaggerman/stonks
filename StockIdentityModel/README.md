@@ -79,6 +79,12 @@ out of training entirely must stay consistent across windows and find themselves
 neighbor against the trained gallery. `latest.pt` is written at every eval. Both store full
 training state and are valid `--resume` targets.
 
+Selection is switchable: `--best-metric consistency` picks best.pt by the *lowest* held-out
+consistency median computed over `cons_eval_windows` (32) windows spread across the sampler's
+M strata — the full timeline, the way training samples — instead of the newest 16 (smoother
+than retrieval's 10-trial granularity; the eval log gains `consistency_*_stratified` columns).
+Caveat: consistency is scale-dependent and collapse-blind — keep reading the retrieval column.
+
 ## File map
 
 | File | Responsibility |

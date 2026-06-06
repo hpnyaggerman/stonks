@@ -407,6 +407,7 @@ No fixed step budget; the operator picks the checkpoint from the training graphs
 
 - **Every step (free, already computed in the loss):** all §10 scalar series. Note the §6.8 normalization holds normalized terms near 1 by construction — the *raw* magnitudes are the convergence curves.
 - **Every ~200–500 steps:** run the held-out §8 consistency + retrieval protocol and the partition-redraw agreement check, and write a checkpoint — so every checkpoint carries its acceptance numbers. The deciding curve for checkpoint selection is the held-out metric, per §8's own doctrine that training loss certifies nothing.
+- **Selection metric** (`best_metric`): default = held-out retrieval accuracy (the acceptance metric). Optional `consistency` mode selects on the held-out consistency median computed over `cons_eval_windows` (32) windows spread across the sampler's M strata — the full timeline, mirroring how training samples windows — rather than the newest 16. Use it when retrieval's 10-trial granularity (±0.1 steps, std ≈ ±0.13) makes selection too noisy. Caveat: consistency is scale-dependent and collapse-blind; the retrieval column remains the acceptance read.
 - **Checkpoints store full training state**: weights, optimizer state, §6.8 EMA normalizers, anchors, stratum queue positions, visit counters, RNG state. Visit counters are load-bearing — partition seeds are `(window id, visit counter)` (§4.3). Selection reads weights only; the shipped table is recomputed at export (§8).
 
 ### 11.5 Pinned defaults

@@ -13,7 +13,7 @@ import torch
 from .config import Config
 from .data import StockData, ladder
 from .model import IdentityEncoder
-from .sampling import draw_partitions
+from .sampling import draw_partitions, split_strata
 
 
 @torch.no_grad()
@@ -48,23 +48,45 @@ def _mean_pairwise(zs: np.ndarray) -> float:
     return float(d[np.triu_indices(n, 1)].mean())
 
 
-@torch.no_grad()
-def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
-    was_training = model.training
-    model.eval()
-    eval_windows = ds.usable_windows[-cfg.eval_windows :]
-
-    per_win: dict[int, tuple] = {w: window_embeddings(model, ds, w) for w in eval_windows}
-
-    # --- across-window consistency: holdout vs trained ---
+def _series(per_win: dict[int, tuple], windows: list[int]) -> tuple[dict, dict]:
+    """Per-ticker embedding series over the given windows: (train, holdout)."""
     train_series: dict[int, list[np.ndarray]] = {}
     hold_series: dict[int, list[np.ndarray]] = {}
-    for w in eval_windows:
+    for w in windows:
         uni, Z, hold = per_win[w]
         for k, t in enumerate(uni):
             train_series.setdefault(int(t), []).append(Z[k])
         for h, z in hold.items():
             hold_series.setdefault(h, []).append(z)
+    return train_series, hold_series
+
+
+def stratified_eval_windows(ds: StockData, cfg: Config) -> list[int]:
+    """cons_eval_windows windows spread the way training spreads its draws: the
+    sampler's M contiguous strata (identical block boundaries via split_strata),
+    equal counts per stratum, evenly spaced within each. Deterministic."""
+    per = max(1, cfg.cons_eval_windows // cfg.M)
+    out: list[int] = []
+    for s in split_strata(ds.usable_windows, cfg.M):
+        if not s:
+            continue
+        idx = np.unique(np.linspace(0, len(s) - 1, num=min(per, len(s))).round().astype(int))
+        out.extend(s[i] for i in idx)
+    return sorted(set(out))
+
+
+@torch.no_grad()
+def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
+    was_training = model.training
+    model.eval()
+    eval_windows = ds.usable_windows[-cfg.eval_windows :]
+    strat_windows = stratified_eval_windows(ds, cfg) if cfg.best_metric == "consistency" else []
+    per_win: dict[int, tuple] = {
+        w: window_embeddings(model, ds, w) for w in sorted(set(eval_windows) | set(strat_windows))
+    }
+
+    # --- across-window consistency: holdout vs trained ---
+    train_series, hold_series = _series(per_win, eval_windows)
     train_cons = [_mean_pairwise(np.stack(v)) for v in train_series.values() if len(v) >= 2]
     hold_cons = [_mean_pairwise(np.stack(v)) for v in hold_series.values() if len(v) >= 2]
     consistency_ratio = (
@@ -130,6 +152,21 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
     inter = _mean_pairwise(reps[0])
     partition_agreement = float(within_ticker / inter) if inter else float("nan")
 
+    # --- stratified consistency (best_metric="consistency"): the same medians, but
+    # over windows spread across the full timeline the way training samples, and
+    # more of them. Scale-dependent and collapse-blind — cross-check retrieval. ---
+    strat: dict[str, float] = {}
+    if strat_windows:
+        tr_s, ho_s = _series(per_win, strat_windows)
+        tc = [_mean_pairwise(np.stack(v)) for v in tr_s.values() if len(v) >= 2]
+        hc = [_mean_pairwise(np.stack(v)) for v in ho_s.values() if len(v) >= 2]
+        strat = {
+            "consistency_train_stratified": float(np.median(tc)) if tc else float("nan"),
+            "consistency_holdout_stratified": float(np.median(hc)) if hc else float("nan"),
+            "consistency_ratio_stratified": float(np.median(hc) / np.median(tc)) if tc and hc else float("nan"),
+            "cons_windows": len(strat_windows),
+        }
+
     if was_training:
         model.train()
     return {
@@ -140,4 +177,5 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
         "retrieval_tested": tested,
         "gallery_size": len(gallery_ids),
         "partition_agreement": partition_agreement,
+        **strat,
     }

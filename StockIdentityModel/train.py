@@ -41,6 +41,20 @@ def build_optimizer(model: IdentityEncoder, cfg: Config) -> torch.optim.AdamW:
     )
 
 
+def _best_score(cfg: Config, metrics: dict) -> float | None:
+    """Checkpoint-selection score, higher = better. None = metric unavailable this eval.
+
+    "retrieval" (default): max holdout retrieval_acc — the acceptance metric.
+    "consistency": min stratified holdout consistency median (negated here) —
+    smoother, but scale-dependent and collapse-blind; the retrieval column
+    stays the acceptance read."""
+    if cfg.best_metric == "consistency":
+        v = metrics.get("consistency_holdout_stratified")
+        return -v if v is not None and not math.isnan(v) else None
+    v = metrics.get("retrieval_acc")
+    return v if v is not None and not math.isnan(v) else None
+
+
 def lr_at(step: int, cfg: Config) -> float:
     """Linear warmup to lr_peak, cosine decay to lr_min. 1-based step."""
     if step <= cfg.warmup_steps:
@@ -190,6 +204,8 @@ def load_checkpoint(path: Path, model, opt, anchors, norm, sampler) -> int:
 
 
 def train(cfg: Config, resume: str | None = None) -> Path:
+    if cfg.best_metric not in ("retrieval", "consistency"):
+        raise ValueError(f"unknown best_metric {cfg.best_metric!r}")
     torch.set_num_threads(cfg.num_threads)
     torch.manual_seed(cfg.train_seed)
     dev = torch.device(cfg.resolved_device())
@@ -223,7 +239,7 @@ def train(cfg: Config, resume: str | None = None) -> Path:
 
     log_f = open(run_dir / "train_log.jsonl", "a")
     eval_f = open(run_dir / "eval_log.jsonl", "a")
-    best_retrieval = -1.0
+    best_score = -math.inf
 
     for step in range(start_step + 1, cfg.max_steps + 1):
         t0 = time.time()
@@ -290,8 +306,9 @@ def train(cfg: Config, resume: str | None = None) -> Path:
             eval_f.flush()
             print(f"[eval @ {step}] {json.dumps(metrics)}")
             save_checkpoint(run_dir / "latest.pt", step, model, opt, anchors, norm, sampler, cfg, meta, metrics)
-            if metrics.get("retrieval_acc", -1) >= best_retrieval:
-                best_retrieval = metrics["retrieval_acc"]
+            score = _best_score(cfg, metrics)
+            if score is not None and score >= best_score:
+                best_score = score
                 save_checkpoint(run_dir / "best.pt", step, model, opt, anchors, norm, sampler, cfg, meta, metrics)
 
     if not (run_dir / "latest.pt").exists():
@@ -311,6 +328,14 @@ def main():
     ap.add_argument("--config", default=None, help="JSON config to start from")
     ap.add_argument("--device", default=None, help='"auto" (default), "cpu", "cuda", or "cuda:N"')
     ap.add_argument(
+        "--best-metric",
+        default=None,
+        choices=["retrieval", "consistency"],
+        help='best.pt selection: "retrieval" (default; max holdout retrieval_acc) or '
+        '"consistency" (min holdout consistency median over windows stratified like training)',
+    )
+    ap.add_argument("--cons-eval-windows", type=int, default=None, help="windows for the stratified consistency metric")
+    ap.add_argument(
         "--no-grad-checkpoint",
         action="store_true",
         help="keep temporal-encoder activations in memory (faster; fine on a GPU with headroom)",
@@ -320,7 +345,7 @@ def main():
     cfg = Config.load(args.config) if args.config else Config()
     if args.run_dir:
         cfg.run_dir = args.run_dir
-    for k in ("max_steps", "eval_every", "warmup_steps", "device"):
+    for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric", "cons_eval_windows"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)

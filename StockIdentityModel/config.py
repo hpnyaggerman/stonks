@@ -79,6 +79,11 @@ class Config:
     eval_every: int = 250        # eval cadence, in steps; checkpoints written at the same cadence
     eval_windows: int = 16       # windows used by the held-out consistency/retrieval protocol
     eval_redraws: int = 5        # partition-redraw agreement samples
+    best_metric: str = "retrieval"  # best.pt selection: "retrieval" (max holdout retrieval_acc) or
+                                 # "consistency" (min stratified holdout consistency median;
+                                 # scale-dependent — cross-check the retrieval column for collapse)
+    cons_eval_windows: int = 32  # windows for the stratified consistency metric, spread over the
+                                 # M strata the way training sampling spreads its draws
     K_inf: int = 4               # windows averaged at inference
     calibrate_init: bool = True  # fresh runs: rescale the final projection so per-dim var(z-bar)
                                  # starts at v0 — hinges begin satisfied (fences, not springs)

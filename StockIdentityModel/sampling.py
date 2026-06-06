@@ -4,6 +4,21 @@ from __future__ import annotations
 import numpy as np
 
 
+def split_strata(window_ids: list[int], M: int) -> list[list[int]]:
+    """M contiguous blocks over the sorted window ids, equal counts (+-1), oldest first.
+
+    Shared by the training sampler and the stratified consistency metric, so
+    "spread like training" means exactly the same block boundaries."""
+    ordered = sorted(window_ids)
+    sizes = [len(ordered) // M + (1 if i < len(ordered) % M else 0) for i in range(M)]
+    out: list[list[int]] = []
+    pos = 0
+    for s in sizes:
+        out.append(ordered[pos : pos + s])
+        pos += s
+    return out
+
+
 class StratumSampler:
     """M contiguous strata over the usable-window sequence; W draws per stratum per step.
 
@@ -14,16 +29,10 @@ class StratumSampler:
 
     def __init__(self, window_ids: list[int], M: int, W: int, rng: np.random.Generator):
         self.M, self.W, self.rng = M, W, rng
-        ordered = sorted(window_ids)
-        # equal window counts (+-1), oldest block first
-        sizes = [len(ordered) // M + (1 if i < len(ordered) % M else 0) for i in range(M)]
-        self.strata: list[list[int]] = []
-        pos = 0
-        for s in sizes:
-            self.strata.append(ordered[pos : pos + s])
-            pos += s
+        self.strata = split_strata(window_ids, M)
         if any(len(s) < 1 for s in self.strata):
-            raise ValueError(f"stratum with no windows: sizes={sizes}")
+            raise ValueError(f"stratum with no windows: sizes={[len(s) for s in self.strata]}")
+        ordered = sorted(window_ids)
         self.queues: list[list[int]] = [[] for _ in range(M)]
         self.visits: dict[int, int] = {w: 0 for w in ordered}
 
