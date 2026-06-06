@@ -85,11 +85,15 @@ class Config:
     eval_every: int = 250        # eval cadence, in steps; checkpoints written at the same cadence
     eval_windows: int = 16       # windows used by the held-out consistency/retrieval protocol
     eval_redraws: int = 5        # partition-redraw agreement samples
-    best_metric: str = "retrieval"  # best.pt selection: "retrieval" (max holdout retrieval_acc) or
+    best_metric: str = "retrieval"  # best.pt selection: "retrieval" (max holdout retrieval_acc),
                                  # "consistency" (min stratified holdout consistency median;
-                                 # scale-dependent — cross-check the retrieval column for collapse)
-    cons_eval_windows: int = 32  # windows for the stratified consistency metric, spread over the
-                                 # M strata the way training sampling spreads its draws
+                                 # scale-dependent — cross-check the retrieval column), or
+                                 # "margin" (max stratified median impostor/own distance ratio —
+                                 # continuous, scale-free form of retrieval; > 1 iff top-1 hit)
+    strat_eval_windows: int = 32 # size of the stratified window set feeding BOTH stratified
+                                 # selection modes ("consistency" and "margin"): spread over the
+                                 # M strata the way training sampling spreads its draws.
+                                 # `eval_windows` (newest-16 block) is a separate, always-on set.
     K_inf: int = 4               # windows averaged at inference
     calibrate_init: bool = True  # fresh runs: rescale the final projection so per-dim var(z-bar)
                                  # starts at v0 — hinges begin satisfied (fences, not springs)
@@ -114,5 +118,7 @@ class Config:
     @classmethod
     def load(cls, path: str | Path) -> "Config":
         d = json.loads(Path(path).read_text())
+        if "cons_eval_windows" in d and "strat_eval_windows" not in d:  # pre-rename configs
+            d["strat_eval_windows"] = d.pop("cons_eval_windows")
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in d.items() if k in known})

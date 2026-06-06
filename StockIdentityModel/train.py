@@ -46,12 +46,15 @@ def _best_score(cfg: Config, metrics: dict) -> float | None:
 
     "retrieval" (default): max holdout retrieval_acc — the acceptance metric.
     "consistency": min stratified holdout consistency median (negated here) —
-    smoother, but scale-dependent and collapse-blind; the retrieval column
-    stays the acceptance read."""
+    smoother, but scale-dependent and collapse-blind.
+    "margin": max stratified median margin ratio d(nearest impostor)/d(own key)
+    — the continuous, scale-free form of retrieval (>1 iff top-1 hit).
+    In all modes the retrieval column stays the acceptance read."""
     if cfg.best_metric == "consistency":
         v = metrics.get("consistency_holdout_stratified")
         return -v if v is not None and not math.isnan(v) else None
-    v = metrics.get("retrieval_acc")
+    key = "margin_ratio_stratified" if cfg.best_metric == "margin" else "retrieval_acc"
+    v = metrics.get(key)
     return v if v is not None and not math.isnan(v) else None
 
 
@@ -208,7 +211,7 @@ def load_checkpoint(path: Path, model, opt, anchors, norm, sampler) -> int:
 
 
 def train(cfg: Config, resume: str | None = None) -> Path:
-    if cfg.best_metric not in ("retrieval", "consistency"):
+    if cfg.best_metric not in ("retrieval", "consistency", "margin"):
         raise ValueError(f"unknown best_metric {cfg.best_metric!r}")
     torch.set_num_threads(cfg.num_threads)
     torch.manual_seed(cfg.train_seed)
@@ -338,11 +341,15 @@ def main():
     ap.add_argument(
         "--best-metric",
         default=None,
-        choices=["retrieval", "consistency"],
-        help='best.pt selection: "retrieval" (default; max holdout retrieval_acc) or '
-        '"consistency" (min holdout consistency median over windows stratified like training)',
+        choices=["retrieval", "consistency", "margin"],
+        help='best.pt selection: "retrieval" (default; max holdout retrieval_acc), '
+        '"consistency" (min holdout consistency median over windows stratified like training), or '
+        '"margin" (max stratified median of d(nearest impostor)/d(own key) — continuous retrieval)',
     )
-    ap.add_argument("--cons-eval-windows", type=int, default=None, help="windows for the stratified consistency metric")
+    ap.add_argument(
+        "--strat-eval-windows", type=int, default=None,
+        help='size of the stratified window set used by the "consistency" and "margin" selection modes',
+    )
     ap.add_argument("--no-window-offset", action="store_true", help="train on the fixed tiling only (disable per-epoch offsets)")
     ap.add_argument(
         "--no-grad-checkpoint",
@@ -354,7 +361,7 @@ def main():
     cfg = Config.load(args.config) if args.config else Config()
     if args.run_dir:
         cfg.run_dir = args.run_dir
-    for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric", "cons_eval_windows"):
+    for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric", "strat_eval_windows"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)
