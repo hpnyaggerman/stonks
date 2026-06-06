@@ -1,4 +1,40 @@
-"""Configuration for the Stock Identity Encoder."""
+"""Configuration for the Stock Identity Encoder.
+
+Tuning doctrine — paid for in runs r1-r9; read before changing any knob:
+
+1. Change a WORKING config only on (a) measured harm or (b) a mechanism-backed
+   hypothesis with a predicted observable. "Looks inefficient" is neither.
+   Both r8 changes optimized away equilibrium features of the best run on
+   record: util never reaching v0 looked like waste but was the inflation
+   mechanism holding the space open (r8: per-dim variance crashed 100x under
+   the floor, 28/32 dims dead); clip_norm=1.0 firing on 100% of steps looked
+   mislabeled but is always-on gradient normalization, load-bearing for the
+   late-run grind (r9: clip=25 ran ahead early, then stalled 15k steps at
+   retrieval 0.5 vs r7's 0.8). A fence that is always leaned on is not
+   redundant — it is the thing holding the shape.
+2. One variable per run, same train_seed. Paired runs then share the window
+   schedule, partitions, and dropout draws, so eval differences are
+   attributable. r8 bundled two changes and needed r9 to un-confound them.
+3. Geometry knobs (v0, m_sep, D) shift the balance of power toward the
+   scale-blind loss terms: anc is l1 (constant grip at any distance), syn is
+   a ratio (blind to size) — neither weakens when the space shrinks, while
+   the hinge fences and util have bounded force ceilings. Shrink the target
+   geometry and the scale-blind pulls win the opening race.
+4. Train-log term values certify nothing (normalization holds them near 1 by
+   construction). Decide on gradient forces (force/denom records), the
+   per-dim variance spectrum, zbar distances, and the held-out eval curves.
+   r1's collapse was invisible in values and obvious in forces; r9's stall
+   was invisible in the train log entirely and obvious only in eval.
+
+Run ledger: r1 total collapse (per-term EMA normalization made collapse a
+stable attractor -> normalization split + kappa_floor); r2 anchor l1 ratchet
+(-> fixed denom sqrt(v0)); r3 fixed-tiling memorization + dimensional
+concentration (-> window_offset, lambda_util 1->3); r6->r7 kappa_floor
+0.01->0.05 (contraction/expansion rebalance; best run: holdout retrieval 0.8,
+newest margin ~1.5); r8 v0 1.0->0.4 dimensional collapse (reverted); r9
+clip_norm 1->25 premature stall (reverted). This file's defaults = r7's
+recipe.
+"""
 from __future__ import annotations
 
 import json
@@ -87,11 +123,15 @@ class Config:
     adam_beta2: float = 0.98
     adam_eps: float = 1e-8
     weight_decay: float = 0.01
-    clip_norm: float = 25.0      # raised 1.0 -> 25.0 after r7: 100% of steps clipped at median
-                                 # grad norm 12.9 — clip had become a permanent per-step
-                                 # renormalizer instead of a transient-spike guard; 25 sits above
-                                 # the typical norm so spikes still clip, ordinary steps don't
-                                 # (r8: 2.4% of steps clipped, all in warmup — inert afterwards)
+    clip_norm: float = 1.0       # NOT a transient-spike guard: typical grad norms run 5-20, so
+                                 # this clips 100% of steps — i.e. always-on gradient
+                                 # normalization, and it is load-bearing: every step enters Adam
+                                 # at the same magnitude, the effective step follows the lr
+                                 # schedule alone, and spiky window draws can't outvote quiet
+                                 # ones. One-variable test (r7 clip=1 vs r9 clip=25, same seed):
+                                 # r9 ahead early, then stalled 15k steps at retrieval 0.5 /
+                                 # margin ~1.1 (native gn decay 20->7.5 = double annealing);
+                                 # r7 ground steadily to 0.8 / ~1.5. Do not "fix" this again.
 
     # --- holdout ---
     holdout_frac: float = 0.05
