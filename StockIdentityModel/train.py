@@ -112,16 +112,20 @@ def draw_observer_dropout(real: torch.Tensor, p_attn: float) -> torch.Tensor:
     return keep
 
 
-def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]], cfg: Config) -> StepStore:
+def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]], cfg: Config, offset: int = 0) -> StepStore:
     """One step's forward pass: encode each drawn window once, then group and
-    run the three views per scale."""
+    run the three views per scale. `offset` shifts the whole tiling (one value
+    per sampler epoch); 0 = the fixed tiling."""
     store = StepStore()
     dev = next(model.parameters()).device
-    feats_t = ds.feats  # numpy [T, F, N, 5]
     for slot, (w, visit) in enumerate(draws):
-        uni = ds.train_universe(w)
+        a = ds.shifted_start(w, offset)
+        uni = ds.universe_at(a)
+        if len(uni) < cfg.Y:  # shifted span dipped below minimum group size: fall back to the base span
+            a = ds.base_start(w)
+            uni = ds.train_universe(w)
         U = len(uni)
-        x = torch.from_numpy(feats_t[uni, w]).to(dev)
+        x = torch.from_numpy(ds.window_feats_at(uni, a)).to(dev)
         H = model.encode_window(x, grad_checkpoint=cfg.grad_checkpoint)
         parts = draw_partitions(U, ladder(U, cfg.Y), seed=(w, visit))
         for n_s, groups in parts.items():
@@ -230,7 +234,10 @@ def train(cfg: Config, resume: str | None = None) -> Path:
     opt = build_optimizer(model, cfg)
     anchors = AnchorState(ds.T, cfg.D, cfg, device=dev)
     norm = EmaNormalizer(cfg.beta, cfg.eps, cfg.kappa_floor)
-    sampler = StratumSampler(ds.usable_windows, cfg.M, cfg.W, np.random.default_rng(cfg.train_seed))
+    sampler = StratumSampler(
+        ds.usable_windows, cfg.M, cfg.W, np.random.default_rng(cfg.train_seed),
+        offset_range=cfg.N if cfg.window_offset else 0,
+    )
 
     start_step = 0
     if resume:
@@ -244,8 +251,8 @@ def train(cfg: Config, resume: str | None = None) -> Path:
     for step in range(start_step + 1, cfg.max_steps + 1):
         t0 = time.time()
         model.train()
-        draws = sampler.draw()
-        store = run_step(model, ds, draws, cfg)
+        draws = sampler.draw()  # may roll the epoch: offset is fixed after this call until the next refill
+        store = run_step(model, ds, draws, cfg, offset=sampler.offset)
         batch = store.finalize(device=dev)
         idx = StepIndex(batch, cfg, ds.tau_prox)
         terms, I, I_per_ticker, present, zbar, spectrum = step_losses(cfg, batch, idx, ds.T, anchors)
@@ -268,6 +275,7 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         rec = {
             "step": step,
             "lr": lr,
+            "offset": sampler.offset,
             "total": float(total.detach()),
             "grad_norm": float(gn),
             "secs": round(time.time() - t0, 2),
@@ -335,6 +343,7 @@ def main():
         '"consistency" (min holdout consistency median over windows stratified like training)',
     )
     ap.add_argument("--cons-eval-windows", type=int, default=None, help="windows for the stratified consistency metric")
+    ap.add_argument("--no-window-offset", action="store_true", help="train on the fixed tiling only (disable per-epoch offsets)")
     ap.add_argument(
         "--no-grad-checkpoint",
         action="store_true",
@@ -351,6 +360,8 @@ def main():
             setattr(cfg, k, v)
     if args.no_grad_checkpoint:
         cfg.grad_checkpoint = False
+    if args.no_window_offset:
+        cfg.window_offset = False
     train(cfg, resume=args.resume)
 
 

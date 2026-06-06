@@ -22,6 +22,10 @@ class Config:
     Y: int = 8                   # minimum group size
     calendar: str = "benchmark"  # "benchmark" = SPY trading days; "union" = union of ticker dates
     q_clip: float = 0.999        # log-return clipping quantile (global, symmetric, frozen)
+    window_offset: bool = True   # training only: shift the whole tiling by one random offset
+                                 # delta in [0, N) per sampler epoch — same 104 fixed inputs
+                                 # repeated ~1500x fed the r3 memorization; eval/export keep
+                                 # the fixed (delta=0) tiling
 
     # --- model ---
     D: int = 32                  # embedding dimension
@@ -55,7 +59,9 @@ class Config:
     lambda_xsep: float = 1.0
     lambda_psep: float = 1.0
     lambda_anc: float = 1.0
-    lambda_util: float = 1.0
+    lambda_util: float = 3.0     # raised 1 -> 3 after r3: dimensional concentration (median dim
+                                 # variance ~1e-4 vs v0=1, identity packed into a handful of dims)
+                                 # while util's force was the one fighting and losing at 1.0
     lambda_syn: float = 0.3      # principal tuning knob: sets the masked-vs-full equilibrium
 
     # --- optimizer & schedule ---

@@ -59,6 +59,8 @@ flowchart TD
 
 Tile the timeline into non-overlapping windows of `N` trading days. A ticker belongs to `U_w` only if all `N` days are present. The window index `t_w` is recorded for loss weighting and is never fed to the model — a model that can see calendar position can fingerprint eras, which contradicts persistence.
 
+**Training tiling offset.** During training the whole tiling is shifted back by one random offset `δ ∈ [0, N)` per sampler epoch (one full without-replacement pass over the windows): window `k` covers `[base_k − δ, base_k − δ + N)`, underflow at the old end falls back to the base span. One `δ` per epoch keeps every within-step comparison on a single coherent tiling. Rationale (run r3 post-mortem): with the fixed tiling there are only ~104 × #tickers distinct input tensors, each shown ~1500 times over a training run — enough repetition to memorize specific window textures instead of learning identity; offsets make the exact-input repeat count ~1 while every span remains authentic market data. Evaluation, export, and inference always use the base (`δ = 0`) tiling.
+
 ### 4.2 Step sampling
 
 Split the window sequence into `M` contiguous strata. Each training step draws **`W` windows per stratum** (`M·W` windows total), so every step compares a ticker against itself across the full span of history.
@@ -78,7 +80,7 @@ flowchart LR
     sM -->|"W windows"| step
 ```
 
-Draws are without replacement: each stratum keeps a shuffled queue and reshuffles only when the queue runs out. Consequences: no window is reused before all others in its stratum have been used, and since every stratum drains at `W` windows per step, the whole timeline cycles nearly simultaneously. With `W > 1`, some of a step's window pairs come from the same era; the proximity weight κ (§6) already weights close pairs, so no special handling is needed.
+Draws are without replacement: each stratum keeps a shuffled queue; when any queue cannot serve `W` draws, **all queues refill and reshuffle together** (at most one leftover window per stratum is discarded), which defines the epoch boundary at which the tiling offset δ (§4.1) is redrawn. Consequences: no window is reused before (almost) all others in its stratum have been used, and the whole timeline cycles simultaneously under a single tiling per epoch. With `W > 1`, some of a step's window pairs come from the same era; the proximity weight κ (§6) already weights close pairs, so no special handling is needed.
 
 `W = 2` (the default) also serves eligibility: with `W = 1`, a ticker whose entire history sits inside one stratum can appear in at most one of a step's windows and therefore never enters temporal consistency (§4.4, §6.3). Two draws per stratum make within-stratum pairs possible, so short-history tickers receive the persistence signal too.
 
@@ -361,7 +363,9 @@ Training loss going down does not certify the goal; this test does. (Holdout sel
 | `κ_floor` | EMA-denominator floor, as a fraction of the term's first-step value (§6.8) | 0.01 |
 | `ε` | numerical safety constant | 1e−6 |
 | `λ_full / λ_self / λ_peer` | view weights | 1.0 / 0.5 / 0.5 |
-| `λ_sc, λ_tc, λ_xsep, λ_psep, λ_anc, λ_util` | term priorities | 1.0 each |
+| `λ_sc, λ_tc, λ_xsep, λ_psep, λ_anc` | term priorities | 1.0 each |
+| `λ_util` | utilization priority — raised after r3's dimensional concentration (median dim variance ~1e−4 vs `v₀ = 1`) | 3.0 |
+| `window_offset` | per-epoch training tiling offset (§4.1) | on |
 | `λ_syn` | synergy priority — principal knob | 0.3 |
 | `g_exact` | exact peer-view threshold | 64 |
 | `q_clip` | log-return clipping quantile | 0.999 |

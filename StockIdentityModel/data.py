@@ -57,6 +57,8 @@ class StockData:
             self.win_start = int(z["win_start"])
             self.complete = z["complete"]
             self.feats = z["feats"]
+            self.panels = z["panels"]
+            self.ok = z["ok"]
         else:
             self._build(files, raw)
             if use_cache:
@@ -67,6 +69,8 @@ class StockData:
                     win_start=self.win_start,
                     complete=self.complete,
                     feats=self.feats,
+                    panels=self.panels,
+                    ok=self.ok,
                 )
 
         self.T = len(self.tickers)
@@ -77,7 +81,7 @@ class StockData:
 
     def _cache_key(self, files: list[Path], raw: Path) -> str:
         h = hashlib.sha256()
-        h.update(f"N={self.cfg.N};cal={self.cfg.calendar}".encode())
+        h.update(f"v2;N={self.cfg.N};cal={self.cfg.calendar}".encode())  # v2: cache carries raw panels
         for f in files:
             st = f.stat()
             h.update(f"{f.name}:{st.st_size}:{st.st_mtime_ns}".encode())
@@ -133,6 +137,8 @@ class StockData:
         assert np.isfinite(feats).all(), "non-finite features in complete cells"
         self.complete = complete
         self.feats = feats
+        self.panels = panels  # raw [5, T, G] grids — offset-window features are cut from these
+        self.ok = ok          # [T, G] per-day completeness (finite, prices > 0, V > 0)
 
     # ------------------------------------------------------ config-dependent
 
@@ -151,6 +157,10 @@ class StockData:
         hold = np.zeros(self.T, dtype=bool)
         hold[self.holdout_idx] = True
         self.train_idx = np.flatnonzero(~hold)
+        self._train_mask = ~hold
+        # per-day completeness prefix sums: span [a, a+N) complete iff the count equals N
+        self._ok_cum = np.zeros((self.T, len(self.grid) + 1), dtype=np.int32)
+        self._ok_cum[:, 1:] = np.cumsum(self.ok, axis=1, dtype=np.int32)
 
         # per-window universes: holdout exclusion is total — held-out tickers appear in no
         # universe, neither as observers nor as attention context
@@ -172,6 +182,35 @@ class StockData:
 
     def train_universe(self, w: int) -> np.ndarray:
         return self._train_universe[w]
+
+    # ------------------------------------------------- offset windows (training)
+
+    def base_start(self, w: int) -> int:
+        return self.win_start + w * self.cfg.N
+
+    def shifted_start(self, w: int, offset: int) -> int:
+        """Window w's start under tiling offset delta (shift back in time);
+        falls back to the base tiling when the shift runs off the grid's old end."""
+        a = self.base_start(w) - offset
+        return a if a >= 0 else self.base_start(w)
+
+    def universe_at(self, a: int) -> np.ndarray:
+        """Training tickers complete over the arbitrary span [a, a+N)."""
+        N = self.cfg.N
+        complete = (self._ok_cum[:, a + N] - self._ok_cum[:, a]) == N
+        return np.flatnonzero(complete & self._train_mask)
+
+    def window_feats_at(self, uni: np.ndarray, a: int) -> np.ndarray:
+        """Normalized [len(uni), N, 5] features for the span [a, a+N) — the same
+        operations the fixed tiling applies (day-0 base = own open, volume vs the
+        span's median, frozen clip thresholds), at an arbitrary start day."""
+        b = a + self.cfg.N
+        O, H, L, C, V = (p[uni, a:b] for p in self.panels)
+        base = np.concatenate([O[:, :1], C[:, :-1]], axis=1)
+        price = np.stack([np.log(X / base) for X in (O, H, L, C)], axis=-1)
+        price = np.clip(price, self.clip_lo, self.clip_hi)
+        vol = np.log(V / np.median(V, axis=1, keepdims=True))[..., None]
+        return np.concatenate([price, vol], axis=-1).astype(np.float32)
 
     def window_dates(self, w: int) -> tuple[str, str]:
         a = self.win_start + w * self.cfg.N

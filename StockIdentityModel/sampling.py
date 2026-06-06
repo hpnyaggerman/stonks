@@ -22,27 +22,35 @@ def split_strata(window_ids: list[int], M: int) -> list[list[int]]:
 class StratumSampler:
     """M contiguous strata over the usable-window sequence; W draws per stratum per step.
 
-    Draws are without replacement via per-stratum shuffled queues; a queue is
-    refilled and reshuffled only when empty. Visit counters seed the partition
-    draws and are checkpoint state, so a resumed run replays the same partitions.
+    Draws are without replacement via per-stratum shuffled queues. Queues are
+    refilled and reshuffled **synchronously** — when any queue cannot serve W
+    draws, all queues restart together (at most one leftover window per stratum
+    is discarded) — defining an epoch. One tiling offset in [0, offset_range)
+    is drawn per epoch, so a whole pass over the timeline uses a single tiling.
+    Visit counters seed the partition draws; counters, offset, and RNG state are
+    checkpoint state, so a resumed run replays the same draws.
     """
 
-    def __init__(self, window_ids: list[int], M: int, W: int, rng: np.random.Generator):
+    def __init__(self, window_ids: list[int], M: int, W: int, rng: np.random.Generator, offset_range: int = 0):
         self.M, self.W, self.rng = M, W, rng
         self.strata = split_strata(window_ids, M)
-        if any(len(s) < 1 for s in self.strata):
-            raise ValueError(f"stratum with no windows: sizes={[len(s) for s in self.strata]}")
-        ordered = sorted(window_ids)
+        if any(len(s) < W for s in self.strata):
+            raise ValueError(f"stratum smaller than W={W}: sizes={[len(s) for s in self.strata]}")
         self.queues: list[list[int]] = [[] for _ in range(M)]
-        self.visits: dict[int, int] = {w: 0 for w in ordered}
+        self.visits: dict[int, int] = {w: 0 for w in sorted(window_ids)}
+        self.offset_range = offset_range
+        self.offset = 0
 
     def draw(self) -> list[tuple[int, int]]:
         """One step's windows: [(window_id, visit_counter)], W per stratum, oldest stratum first."""
+        if any(len(q) < self.W for q in self.queues):
+            # epoch boundary: synchronized refill; one offset for the whole epoch
+            self.queues = [list(self.rng.permutation(s)) for s in self.strata]
+            if self.offset_range > 0:
+                self.offset = int(self.rng.integers(0, self.offset_range))
         out = []
         for k in range(self.M):
             for _ in range(self.W):
-                if not self.queues[k]:
-                    self.queues[k] = list(self.rng.permutation(self.strata[k]))
                 w = int(self.queues[k].pop())
                 self.visits[w] += 1
                 out.append((w, self.visits[w]))
@@ -53,12 +61,14 @@ class StratumSampler:
             "queues": [list(q) for q in self.queues],
             "visits": dict(self.visits),
             "rng_state": self.rng.bit_generator.state,
+            "offset": self.offset,
         }
 
     def load_state_dict(self, st: dict) -> None:
         self.queues = [list(q) for q in st["queues"]]
         self.visits = {int(k): int(v) for k, v in st["visits"].items()}
         self.rng.bit_generator.state = st["rng_state"]
+        self.offset = int(st.get("offset", 0))  # legacy checkpoints: fixed tiling
 
 
 def draw_partitions(universe_size: int, group_counts: list[int], seed: tuple[int, int]) -> dict[int, list[np.ndarray]]:

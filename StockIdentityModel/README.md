@@ -116,6 +116,14 @@ Caveat: consistency is scale-dependent and collapse-blind — keep reading the r
   per-term λ·‖∂L/∂z‖/denom (`force`) and the live normalizer denominators (`denom`); every
   step records mean/min pairwise distance of the z̄ population (`zbar_dist`). Collapse is
   read in gradient units, not term values.
+- **Per-epoch tiling offsets** (`window_offset`, on by default; `--no-window-offset`): training
+  windows come from the base tiling shifted back by one random δ ∈ [0, N) per sampler epoch
+  (all stratum queues refill synchronously; one δ per full pass). Post-r3 rationale: the fixed
+  tiling yields only ~104×#tickers distinct input tensors, each repeated ~1500×/run — the
+  memorization engine behind the train/holdout divergence. Offsets cut exact repeats to ~1;
+  every span is still untouched real data. Eval/export/inference always use the δ=0 tiling.
+  The train log records the live `offset`; `lambda_util` default also raised 1 → 3 here
+  (r3 dimensional concentration — watch `var_spectrum`).
 - **Calendar** = SPY trading days (the benchmark grid is immune to rogue dates in any single
   ticker's file). `calendar="union"` switches to the union of all tickers' dates.
 - **Context trust in temporal consistency**: the weight ω(g) = (g−1)/(g−1+c_g) discounts
