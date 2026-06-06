@@ -141,14 +141,14 @@ class Config:
     # --- training / eval ---
     train_seed: int = 0
     eval_every: int = 250        # eval cadence, in steps; checkpoints written at the same cadence
-    eval_windows: int = 16       # windows used by the held-out consistency/retrieval protocol
+    eval_windows: int = 32       # windows used by the held-out consistency/retrieval protocol
     eval_redraws: int = 5        # partition-redraw agreement samples
-    best_metric: str = "retrieval"  # best.pt selection: "retrieval" (max holdout retrieval_acc),
+    best_metric: str = "margin"  # best.pt selection: "retrieval" (max holdout retrieval_acc),
                                  # "consistency" (min stratified holdout consistency median;
                                  # scale-dependent — cross-check the retrieval column), or
                                  # "margin" (max stratified median impostor/own distance ratio —
                                  # continuous, scale-free form of retrieval; > 1 iff top-1 hit)
-    strat_eval_windows: int = 32 # size of the stratified window set feeding BOTH stratified
+    strat_eval_windows: int = 48 # size of the stratified window set feeding BOTH stratified
                                  # selection modes ("consistency" and "margin"): spread over the
                                  # M strata the way training sampling spreads its draws.
                                  # `eval_windows` (newest-16 block) is a separate, always-on set.
