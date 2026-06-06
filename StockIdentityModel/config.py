@@ -43,12 +43,16 @@ class Config:
     tau_prox: float | None = None  # None -> (#usable windows)/10
     c_g: float = 16.0            # context half-trust group size
     m_sep: float | None = None   # None -> sqrt(D*v0)/2 (geometry unit tracks the variance floor)
-    v0: float = 0.4              # per-dimension variance floor — lowered 1.0 -> 0.4 after r7: the
-                                 # z-bar population sat at vmed ~0.2-0.5 all run (nb09=32), util
-                                 # stuck in a losing tug-of-war burning ~1/4-1/3 of the
-                                 # embedding-force budget on an unreachable target while dims
-                                 # churned near death; 0.4 = the realized level, so the hinges
-                                 # are reachable fences again (backstop, not an inflation goal)
+    v0: float = 1.0              # per-dimension variance floor — NOT a free unit: it sets the
+                                 # fences' absolute holding line against the scale-blind pulls
+                                 # (anc is l1 — constant grip at any distance; syn is a ratio —
+                                 # blind to size; neither weakens when the space shrinks). r8
+                                 # lowered it to 0.4 (the "honest" realized level) and the
+                                 # opening race went to contraction: per-dim variance crashed
+                                 # 100x under the floor by ~step 3k, 28/32 dims dead, dz < m_sep,
+                                 # margins eroding all late run. The r7 standoff (vmed ~0.2-0.5
+                                 # vs v0=1 — util pushing forever, never winning) IS the
+                                 # inflation mechanism: the backstop's job is to push, not to win
     lambda_cov: float = 1.0      # decorrelation weight inside L_util
     eta0: float = 0.05           # anchor base gain
     beta: float = 0.99           # EMA decay (loss normalizers and tau_gain)
@@ -87,6 +91,7 @@ class Config:
                                  # grad norm 12.9 — clip had become a permanent per-step
                                  # renormalizer instead of a transient-spike guard; 25 sits above
                                  # the typical norm so spikes still clip, ordinary steps don't
+                                 # (r8: 2.4% of steps clipped, all in warmup — inert afterwards)
 
     # --- holdout ---
     holdout_frac: float = 0.05
