@@ -42,15 +42,25 @@ class Config:
     alpha_prox: float = 1.0      # proximity boost
     tau_prox: float | None = None  # None -> (#usable windows)/10
     c_g: float = 16.0            # context half-trust group size
-    m_sep: float | None = None   # None -> sqrt(D)/2
-    v0: float = 1.0              # per-dimension variance floor
+    m_sep: float | None = None   # None -> sqrt(D*v0)/2 (geometry unit tracks the variance floor)
+    v0: float = 0.4              # per-dimension variance floor — lowered 1.0 -> 0.4 after r7: the
+                                 # z-bar population sat at vmed ~0.2-0.5 all run (nb09=32), util
+                                 # stuck in a losing tug-of-war burning ~1/4-1/3 of the
+                                 # embedding-force budget on an unreachable target while dims
+                                 # churned near death; 0.4 = the realized level, so the hinges
+                                 # are reachable fences again (backstop, not an inflation goal)
     lambda_cov: float = 1.0      # decorrelation weight inside L_util
     eta0: float = 0.05           # anchor base gain
     beta: float = 0.99           # EMA decay (loss normalizers and tau_gain)
     eps: float = 1e-6
     kappa_floor: float = 0.05    # EMA-normalizer denominator floor, as a fraction of the term's
                                  # first-step value: caps a shrinking term's gradient
-                                 # self-amplification at 1/kappa_floor (collapse guard, run r1)
+                                 # self-amplification at 1/kappa_floor (collapse guard, run r1).
+                                 # Raised 0.01 -> 0.05 after r6: contraction forces (sc/tc) ran
+                                 # 1.5-2x the expansion forces — a higher floor engages 5x sooner
+                                 # and caps the amplification at 20x instead of 100x. In practice
+                                 # the raws fall to <1% of first-step within ~500 steps, so this
+                                 # floor IS the sc/tc denominator for the whole run (r7 logs)
     lambda_full: float = 1.0
     lambda_self: float = 0.5
     lambda_peer: float = 0.5
@@ -73,7 +83,10 @@ class Config:
     adam_beta2: float = 0.98
     adam_eps: float = 1e-8
     weight_decay: float = 0.01
-    clip_norm: float = 1.0
+    clip_norm: float = 25.0      # raised 1.0 -> 25.0 after r7: 100% of steps clipped at median
+                                 # grad norm 12.9 — clip had become a permanent per-step
+                                 # renormalizer instead of a transient-spike guard; 25 sits above
+                                 # the typical norm so spikes still clip, ordinary steps don't
 
     # --- holdout ---
     holdout_frac: float = 0.05
@@ -104,7 +117,7 @@ class Config:
     num_threads: int = 4
 
     def resolved_m_sep(self) -> float:
-        return self.m_sep if self.m_sep is not None else math.sqrt(self.D) / 2.0
+        return self.m_sep if self.m_sep is not None else math.sqrt(self.D * self.v0) / 2.0
 
     def resolved_device(self) -> str:
         if self.device == "auto":
