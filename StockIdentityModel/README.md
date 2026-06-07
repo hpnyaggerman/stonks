@@ -145,6 +145,22 @@ Whatever the selector, the retrieval column stays the acceptance read.
   penalize dropout sensitivity.
 - **Pre-norm stacks** end with a final LayerNorm before each output head (standard for
   pre-norm). FF width `d_ff = 4·d_model = 512`, GELU.
+- **Seam blocks** (`adapter_blocks` / `head_blocks`, both default 0 = the r7 architecture):
+  optional per-ticker ResidualMLP stacks at the stage seams. `adapter` re-encodes the
+  temporal summaries at the context module's entry (nonlinear matching kernel for
+  attention; deeper self/peer routes, which raises the synergy bar). `head` runs before
+  the final `ln_f → out` projection (local metric reshaping a linear head cannot do).
+  Row-local by construction — no set-size dependence, no peer-view leak — and traversed
+  identically by all three views, preserving evidence attribution. Output layers are
+  zero-initialized (each block is the identity at init, so calibration and the opening
+  force balance match a blocks-free run), and the modules are declared last so
+  pre-existing parameters draw the same init RNG at the same seed. Checkpoints with seam
+  blocks don't load into blocks-free models and vice versa — fresh runs only.
+- **`scale_agreement`** (eval column, always on): per-ticker spread across every ladder
+  scale at the last window (deterministic full view, one fixed partition per scale)
+  divided by inter-ticker spread at scale 1 — the inference-grade form of scale
+  consistency; lower = better. Complements `partition_agreement`, which isolates
+  composition variance at a fixed size.
 - **Weight decay** excludes biases, LayerNorm parameters, and the final `d_model → D`
   projection (decay there pushes against the variance floor `v0` for no benefit); everything
   else — including the positional embedding — decays.

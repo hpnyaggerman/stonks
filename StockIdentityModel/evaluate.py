@@ -76,6 +76,16 @@ def stratified_eval_windows(ds: StockData, cfg: Config) -> list[int]:
     return sorted(set(out))
 
 
+def _embed_partitioned(model: IdentityEncoder, H: torch.Tensor, U: int, D: int, parts: list, dev) -> np.ndarray:
+    """Deterministic full-view embeddings of one universe under a given partition."""
+    Z = np.zeros((U, D), dtype=np.float32)
+    for grp in parts:
+        Hg = H[torch.from_numpy(grp).to(dev)]
+        real = torch.ones(1, len(grp), dtype=torch.bool, device=dev)
+        Z[grp] = model.context.full_view(Hg[None], real)[0].cpu().numpy()
+    return Z
+
+
 def _retrieval(per_win: dict[int, tuple], windows: list[int], eps: float = 1e-9) -> dict:
     """A/B retrieval and margin ratios over the given windows.
 
@@ -159,22 +169,33 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
     uni = ds.train_universe(w)
     U = len(uni)
     H = model.temporal(torch.from_numpy(ds.feats[uni, w]).to(dev))
-    n_fine = ladder(U, cfg.Y)[-1]
-    reps = []
-    for r in range(cfg.eval_redraws):
-        parts = draw_partitions(U, [n_fine], seed=(w, 10_000_019 + r))[n_fine]
-        Z = np.zeros((U, cfg.D), dtype=np.float32)
-        for grp in parts:
-            Hg = H[torch.from_numpy(grp).to(dev)]
-            real = torch.ones(1, len(grp), dtype=torch.bool, device=dev)
-            Z[grp] = model.context.full_view(Hg[None], real)[0].cpu().numpy()
-        reps.append(Z)
-    reps = np.stack(reps)  # [R, U, D]
+    scales = ladder(U, cfg.Y)
+    n_fine = scales[-1]
+    reps = np.stack([
+        _embed_partitioned(model, H, U, cfg.D, draw_partitions(U, [n_fine], seed=(w, 10_000_019 + r))[n_fine], dev)
+        for r in range(cfg.eval_redraws)
+    ])  # [R, U, D]
     within = np.sqrt(((reps[:, None] - reps[None, :]) ** 2).sum(-1))  # [R, R, U]
     iu = np.triu_indices(cfg.eval_redraws, 1)
     within_ticker = within[iu].mean()
     inter = _mean_pairwise(reps[0])
     partition_agreement = float(within_ticker / inter) if inter else float("nan")
+
+    # --- scale agreement: same window, same tickers, every ladder scale (deterministic
+    # full view, one fixed partition draw serving the whole ladder); per-ticker spread
+    # across scales over inter-ticker spread at scale 1 (the inference geometry). The
+    # inference-grade form of L_sc — certifies set-size invariance on the clean,
+    # dropout-free path the artifact ships. partition_agreement isolates composition at
+    # a fixed size; this isolates size (composition variation folded in, as in training).
+    if len(scales) >= 2:
+        parts_all = draw_partitions(U, scales, seed=(w, 20_000_003))
+        zs = np.stack([_embed_partitioned(model, H, U, cfg.D, parts_all[n], dev) for n in scales])  # [S, U, D]
+        spread = np.sqrt(((zs[:, None] - zs[None, :]) ** 2).sum(-1))  # [S, S, U]
+        ius = np.triu_indices(len(scales), 1)
+        inter_s = _mean_pairwise(zs[0])
+        scale_agreement = float(spread[ius].mean() / inter_s) if inter_s else float("nan")
+    else:
+        scale_agreement = float("nan")
 
     # --- stratified block (best_metric "consistency" or "margin"): the same metrics,
     # but over windows spread across the full timeline the way training samples, and
@@ -206,5 +227,6 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
         "gallery_size": ret["gallery_size"],
         "margin_ratio": ret["margin_ratio"],
         "partition_agreement": partition_agreement,
+        "scale_agreement": scale_agreement,
         **strat,
     }

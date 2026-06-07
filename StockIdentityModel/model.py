@@ -34,6 +34,28 @@ class FeedForward(nn.Module):
         return self.lin2(h)
 
 
+class ResidualMLP(nn.Module):
+    """Pre-norm residual MLP: x + lin2(gelu(lin1(LN(x)))), applied per token.
+
+    The output layer is zero-initialized, so the block is the identity at init:
+    inserted depth leaves step-0 behavior (init calibration, the opening
+    contraction-vs-fence race) unchanged and grows in as training recruits it.
+    Deliberately no dropout: these blocks run once per view, and fresh draws per
+    view would make view differences partly noise rather than withheld evidence.
+    """
+
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.ln = nn.LayerNorm(d_model)
+        self.lin1 = nn.Linear(d_model, d_ff)
+        self.lin2 = nn.Linear(d_ff, d_model)
+        nn.init.zeros_(self.lin2.weight)
+        nn.init.zeros_(self.lin2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.lin2(F.gelu(self.lin1(self.ln(x))))
+
+
 class Attention(nn.Module):
     def __init__(self, d_model: int, n_heads: int):
         super().__init__()
@@ -117,6 +139,13 @@ class TemporalEncoder(nn.Module):
 class ContextModule(nn.Module):
     """L_ctx attention blocks over a group's summary vectors, producing three
     views per observer: full (self + peers), self-only, and peer-only.
+
+    Optional seam blocks (per-ticker ResidualMLPs, traversed identically by all
+    three views): `adapter` re-encodes the temporal summaries before attention —
+    a nonlinear matching kernel, and deeper self/peer routes; `head` reshapes
+    the metric before the final projection. Both are row-local, so they add no
+    set-size dependence and cannot leak an observer's content into peers'
+    values; the leak-closure masking below operates downstream unchanged.
     """
 
     def __init__(self, cfg: Config):
@@ -127,8 +156,24 @@ class ContextModule(nn.Module):
         )
         self.ln_f = nn.LayerNorm(cfg.d_model)
         self.out = nn.Linear(cfg.d_model, cfg.D)
+        # seam blocks (both default 0 = the r7 architecture). Declared last so the
+        # pre-existing parameters above consume the same init-RNG draws as a
+        # blocks-free run at the same seed (paired-run comparability).
+        self.adapter = nn.ModuleList(  # seam A: re-encode summaries before attention
+            ResidualMLP(cfg.d_model, cfg.d_ff) for _ in range(cfg.adapter_blocks)
+        )
+        self.head = nn.ModuleList(  # seam B: nonlinear trunk before the final projection
+            ResidualMLP(cfg.d_model, cfg.d_ff) for _ in range(cfg.head_blocks)
+        )
+
+    def _adapt(self, H: torch.Tensor) -> torch.Tensor:
+        for blk in self.adapter:
+            H = blk(H)
+        return H
 
     def project(self, x: torch.Tensor) -> torch.Tensor:
+        for blk in self.head:
+            x = blk(x)
         return self.out(self.ln_f(x))
 
     def _run(self, x, vis, gates=None, ff_masks=None, kvs=None):
@@ -144,6 +189,7 @@ class ContextModule(nn.Module):
 
     def full_view(self, H: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
         """Deterministic full view (inference/eval): everyone attends self + all real peers."""
+        H = self._adapt(H)
         L = H.shape[1]
         eye = torch.eye(L, dtype=torch.bool, device=H.device)
         vis = (real[:, None, :] & real[:, :, None]) | eye
@@ -157,6 +203,7 @@ class ContextModule(nn.Module):
         ff_masks: list[torch.Tensor] | None,  # per block [B, L, d_ff] scaled keep-masks, or None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (z_full, z_self, z_peer), each [B, L, D]. Pad rows are garbage; caller unpacks by `real`."""
+        H = self._adapt(H)  # pad rows (zeros) map to a shared constant; the masks keep them isolated
         B, L, _ = H.shape
         dev = H.device
         eye = torch.eye(L, dtype=torch.bool, device=dev)

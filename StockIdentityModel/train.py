@@ -350,6 +350,14 @@ def main():
         "--strat-eval-windows", type=int, default=None,
         help='size of the stratified window set used by the "consistency" and "margin" selection modes',
     )
+    ap.add_argument(
+        "--adapter-blocks", type=int, default=None,
+        help="seam-A ResidualMLP blocks at the context module entry (default 0 = the r7 architecture)",
+    )
+    ap.add_argument(
+        "--head-blocks", type=int, default=None,
+        help="seam-B ResidualMLP blocks before the final projection (default 0 = the r7 architecture)",
+    )
     ap.add_argument("--no-window-offset", action="store_true", help="train on the fixed tiling only (disable per-epoch offsets)")
     ap.add_argument(
         "--no-grad-checkpoint",
@@ -361,7 +369,8 @@ def main():
     cfg = Config.load(args.config) if args.config else Config()
     if args.run_dir:
         cfg.run_dir = args.run_dir
-    for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric", "strat_eval_windows"):
+    for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric",
+              "strat_eval_windows", "adapter_blocks", "head_blocks"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)
