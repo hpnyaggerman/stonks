@@ -157,6 +157,15 @@ Whatever the selector, the retrieval column stays the acceptance read.
 - If a step draws the same window twice (possible at a queue refill boundary), the two draws
   occupy distinct slots with fresh partitions; the proximity weight κ — which up-weights
   same-ticker pairs from windows close in time — sees a window distance of 0 for that pair.
+- **Capacity lesson (r10, reverted — code in commit d34dcc4)**: per-ticker ResidualMLP
+  stacks at the two stage seams (+528k params, one variable vs this recipe, same seed)
+  matched it to ~10.5k steps, then bled held-out margins while every train-side signal
+  kept improving; the no-blocks run held 0.8/~1.5 with no slide, and ablating the trained
+  blocks at inference cost ≤9% margin. The loss equilibrium, not the function class, sets
+  the ceiling here: capacity beyond the loss's demand is spent on memorization the
+  objective cannot distinguish from identity. Architecture changes need a demand-side
+  mechanism first — separation weights, or ticker count (the one scaling axis with the
+  field's preconditions attached).
 
 ## Sizing on this repo's data
 

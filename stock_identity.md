@@ -1,6 +1,6 @@
 # Stock Identity Encoder — Specification
 
-**Status:** design spec v0.3 — implementation decisions pinned (§11); collapse guards added after run r1 collapsed (§6.8 normalization split, §11.6). Standalone system living in `StockIdentityModel/` at the repo root; does not depend on or modify the v4 forecasting pipeline.
+**Status:** design spec v0.3 — implementation decisions pinned (§11); collapse guards added after run r1 collapsed (§6.8 normalization split, §11.6); capacity result recorded after run r10 (§11.7). Standalone system living in `StockIdentityModel/` at the repo root; does not depend on or modify the v4 forecasting pipeline.
 
 ## 1. Goal
 
@@ -447,3 +447,9 @@ Run r1 (first full training) collapsed totally by ~step 800: every readout match
 - **Normalization split + floor** — §6.8's two rules. `κ_floor = 0.01` caps any EMA-normalized term's gradient self-amplification at 100× its step-1 calibration. The anchor was moved to the fixed-scale rule after run r2: its ℓ1 gradient does not shrink with its value, so even the floored EMA path let its force climb ~13× and grind the population to ~10⁻⁴ of the variance floor (scale contraction plus dimensional collapse — variance concentrated in a handful of the 32 dims) while the fences pushed back at bounded strength.
 - **Init calibration** (`calibrate_init`, fresh runs only) — before the optimizer is built, rescale the final `d_model → D` projection per dimension so the population variance of `z̄` — measured through the inference geometry (full view, single group, last `K_inf` windows) — starts at `v₀`. Hinges begin satisfied and act as fences; uncalibrated init sits ~2–4 orders of magnitude inside the violation region (r1: per-dim var 1e−4…7e−3 vs `v₀ = 1`) and the contraction wins the opening race.
 - **Force diagnostics** (`grad_diag_every`, default 250) — the train log records per-term `λ_k·‖∂L_k/∂z‖/denom_k` (`force`) and the live denominators (`denom`); every step records mean/min pairwise distance of the `z̄` population (`zbar_dist`). The acceptance doctrine extends: term values certify nothing about force balance — read the forces.
+
+### 11.7 Capacity result (run r10)
+
+Run r10 inserted per-ticker residual MLP blocks at both stage seams (temporal→context entry and pre-projection; +528k parameters, ≈+60%), one variable against the r7 recipe at the same seed. Outcome: identical climb to ~10.5k steps, then held-out margins bled (stratified margin 1.44 → 1.1) while every train-side indicator kept improving and the blocks' functional engagement kept growing (relative displacement 0.9 → 1.3 between peak and end); the no-blocks run held the 0.8 / ~1.5 plateau with no slide. Ablating the trained blocks at inference cost ≤9% margin — their transformations were epiphenomenal to the deployed geometry.
+
+Standing conclusion: the §6.8 force balance, not the function class, sets the ceiling. With the separation hinges slack and synergy saturated, added capacity has no demand to serve and is spent where the loss can price it but the goal cannot — grouping-noise polish, and train-ticker memorization that is invisible in training values (§8's doctrine, third confirmation after r1 and r9). Architecture changes are therefore gated on a demand-side mechanism first: separation weights, or universe size — the one scaling axis with the field's preconditions attached. The experiment's code lives in git history (commit d34dcc4, reverted).

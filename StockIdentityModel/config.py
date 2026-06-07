@@ -1,6 +1,6 @@
 """Configuration for the Stock Identity Encoder.
 
-Tuning doctrine — paid for in runs r1-r9; read before changing any knob:
+Tuning doctrine — paid for in runs r1-r10; read before changing any knob:
 
 1. Change a WORKING config only on (a) measured harm or (b) a mechanism-backed
    hypothesis with a predicted observable. "Looks inefficient" is neither.
@@ -25,6 +25,19 @@ Tuning doctrine — paid for in runs r1-r9; read before changing any knob:
    per-dim variance spectrum, zbar distances, and the held-out eval curves.
    r1's collapse was invisible in values and obvious in forces; r9's stall
    was invisible in the train log entirely and obvious only in eval.
+5. Capacity follows demand. r10 added +528k params of per-ticker ResidualMLP
+   blocks at the two stage seams (temporal->context entry, pre-projection;
+   one variable, same train_seed): identical climb to ~10.5k steps, then
+   holdout margins bled (strat 1.44 -> 1.1) while every train-side indicator
+   kept improving and the blocks' functional engagement kept growing; the
+   no-blocks run held 0.8/~1.5 with no slide. Ablating the trained blocks at
+   inference cost <=9% margin — epiphenomenal to the deployed geometry. With
+   the hinges slack and synergy saturated, the loss had no unmet demand for
+   extra function class, so the capacity was spent on what the loss prices
+   but the goal cannot see: grouping-noise polish and train-ticker
+   memorization (invisible in train-log values — point 4, third
+   confirmation). Raise demand first (separation weights, ticker count);
+   function class last.
 
 Run ledger: r1 total collapse (per-term EMA normalization made collapse a
 stable attractor -> normalization split + kappa_floor); r2 anchor l1 ratchet
@@ -32,7 +45,9 @@ stable attractor -> normalization split + kappa_floor); r2 anchor l1 ratchet
 concentration (-> window_offset, lambda_util 1->3); r6->r7 kappa_floor
 0.01->0.05 (contraction/expansion rebalance; best run: holdout retrieval 0.8,
 newest margin ~1.5); r8 v0 1.0->0.4 dimensional collapse (reverted); r9
-clip_norm 1->25 premature stall (reverted). This file's defaults = r7's
+clip_norm 1->25 premature stall (reverted); r10 seam-capacity ResidualMLPs
+(+528k params) memorization slide, epiphenomenal at inference (reverted;
+code in commit d34dcc4 -> doctrine point 5). This file's defaults = r7's
 recipe.
 """
 from __future__ import annotations
