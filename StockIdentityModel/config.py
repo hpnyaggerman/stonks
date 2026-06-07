@@ -73,15 +73,6 @@ class Config:
     p_attn: float = 0.15         # observer dropout rate
     p_ff: float = 0.10           # feed-forward dropout rate
     g_exact: int = 64            # exact peer view up to this group size; beyond it, the shared-context approximation
-    adapter_blocks: int = 0      # seam A: ResidualMLP blocks on the temporal summaries at the
-                                 # context module entry — nonlinear matching kernel for attention,
-                                 # deeper masked routes. Per-ticker (row-local): adds no set-size
-                                 # dependence and no peer-view leak. Zero-init output layers =
-                                 # identity at init; 0 = the r7 architecture
-    head_blocks: int = 0         # seam B: ResidualMLP blocks before the final ln_f -> out
-                                 # projection — local metric reshaping a linear head cannot do
-                                 # (expand crowded regions without inflating cluster widths).
-                                 # Same guarantees as adapter_blocks; 0 = the r7 architecture
 
     # --- loss ---
     alpha_prox: float = 1.0      # proximity boost
