@@ -100,8 +100,9 @@ float reassociation (~1.7–1.9× throughput). Caveat: per-device dropout RNG ma
 run a different draw realization than a single-GPU run of the same seed (numpy draws —
 windows, partitions, offsets, holdout — stay identical); paired runs must hold `--devices`
 fixed. `--eval-parallel` window-splits the deterministic no-grad eval across the same devices —
-byte-identical metrics, ~2× faster evals. A second GPU can still be spent on a parallel run
-instead (`CUDA_VISIBLE_DEVICES=1`) when comparing recipes.
+byte-identical metrics on identical device types (mixed types differ at float level), ~2× faster
+evals. A second GPU can still be spent on a parallel run instead (`CUDA_VISIBLE_DEVICES=1`) when
+comparing recipes.
 
 Checkpoints and artifacts are machine-portable (loaded via `map_location`, artifact weights
 saved on CPU): train on GPU, export/infer anywhere. Caveat: bit-exact `--resume` replay is a

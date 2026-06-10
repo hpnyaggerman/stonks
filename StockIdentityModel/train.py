@@ -204,7 +204,12 @@ def run_step(replicas: list, devs: list, ds: StockData, draws: list[tuple[int, i
     # host-side numpy from starving the device queues in multi-device mode
     parts_by_job = [draw_partitions(len(uni), ladder(len(uni), cfg.Y), seed=seed) for *_, uni, seed in jobs]
     for (slot, t_w, mkt, a, uni, _), parts in zip(jobs, parts_by_job):
-        di = (slot % len(draws) + slot // len(draws)) % D
+        # device offset cycles through 1..D-1 for derived partners: a US window
+        # and any of its derived secondary jobs never share a device (markets may
+        # share one with each other once #markets >= D — unavoidable by pigeonhole)
+        mi = slot // len(draws)
+        off = 0 if mi == 0 else 1 + (mi - 1) % max(D - 1, 1)
+        di = (slot % len(draws) + off) % D
         mdl, dev = replicas[di], devs[di]
         x = torch.from_numpy(mkt.window_feats_at(uni, a)).to(dev)
         H = mdl.encode_window(x, grad_checkpoint=cfg.grad_checkpoint)
@@ -325,6 +330,8 @@ def load_checkpoint(ck: dict, model, opt, anchors, norm, sampler) -> int:
 def train(cfg: Config, resume: str | None = None) -> Path:
     if cfg.best_metric not in ("retrieval", "consistency", "margin"):
         raise ValueError(f"unknown best_metric {cfg.best_metric!r}")
+    if cfg.loss_chunk < 0:
+        raise ValueError(f"loss_chunk must be >= 0 (0 = monolithic), got {cfg.loss_chunk}")
     ck = None
     if resume:
         ck = torch.load(Path(resume), weights_only=False, map_location="cpu")  # portable across machines
@@ -550,7 +557,7 @@ def main():
     ap.add_argument(
         "--eval-parallel", action="store_true",
         help="split eval windows across --devices (eval is deterministic and per-window "
-        "independent: byte-identical metrics, ~2x faster evals)",
+        "independent: byte-identical metrics on identical device types, ~2x faster evals)",
     )
     ap.add_argument("--no-window-offset", action="store_true", help="train on the fixed tiling only (disable per-epoch offsets)")
     ap.add_argument(

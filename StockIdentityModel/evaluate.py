@@ -27,28 +27,37 @@ from .sampling import draw_partitions, split_strata
 def _per_window_embeddings(replicas: list, ds: StockData, windows, mkt=None) -> dict[int, tuple]:
     """per_win dict over `windows`, optionally split across model replicas on
     different devices (one host thread per replica; CUDA ops release the GIL).
-    Byte-identical to the single-replica path: eval is deterministic, no_grad,
-    and per-window independent — the split only changes who computes what."""
+    Byte-identical to the single-replica path on identical device types: eval is
+    deterministic, no_grad, and per-window independent — the split only changes
+    who computes what. Mixed device types differ at float level."""
     windows = sorted(windows)
     if len(replicas) <= 1 or len(windows) <= 1:
         return {w: window_embeddings(replicas[0], ds, w, mkt) for w in windows}
     out: dict[int, tuple] = {}
+    errs: list[tuple[int, BaseException]] = []
     lock = threading.Lock()
 
-    def work(rep, wins):
-        for w in wins:
-            r = window_embeddings(rep, ds, w, mkt)
-            with lock:
-                out[w] = r
-
+    def work(i, rep, wins):
+        try:
+            for w in wins:
+                r = window_embeddings(rep, ds, w, mkt)
+                with lock:
+                    out[w] = r
+        except BaseException as e:  # surfaced after join — a swallowed thread error
+            with lock:              # would otherwise resurface as a bare KeyError
+                errs.append((i, e)) # in a downstream per_win lookup
     threads = [
-        threading.Thread(target=work, args=(rep, windows[i :: len(replicas)]))
+        threading.Thread(target=work, args=(i, rep, windows[i :: len(replicas)]))
         for i, rep in enumerate(replicas)
     ]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    if errs:
+        i, e = errs[0]
+        dev = next(replicas[i].parameters()).device
+        raise RuntimeError(f"eval replica {i} ({dev}) failed mid-eval") from e
     return out
 
 

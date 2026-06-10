@@ -184,7 +184,7 @@ def view_terms(cfg: Config, B: StepBatch, idx: StepIndex, view: str, T_global: i
     # --- cross-scale separation: (i, s) vs (j != i, s' != s), hinge^2 on mu distances
     st = torch.from_numpy(idx.seg_ticker).to(dev)
     ss = torch.from_numpy(idx.seg_scale).to(dev)
-    if cfg.loss_chunk:
+    if cfg.loss_chunk > 0:
         if idx.xsep_pairs:
             acc = None
             for r0 in range(0, idx.n_seg, cfg.loss_chunk):
@@ -220,7 +220,7 @@ def view_terms(cfg: Config, B: StepBatch, idx: StepIndex, view: str, T_global: i
         out["tc"] = None
 
     # --- peer separation: within each group at each (slot, scale), ordered pairs
-    if cfg.loss_chunk:
+    if cfg.loss_chunk > 0:
         hinge_sum, cnt = None, 0
         for start, end, gid in B.slices:
             c = np.bincount(gid)

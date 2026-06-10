@@ -258,7 +258,9 @@ class Config:
                                  # unchanged); paired runs must hold this fixed
     eval_parallel: bool = False  # split eval windows across `devices` replicas (eval is no_grad +
                                  # deterministic and per-window independent -> byte-identical
-                                 # metrics). No-op with a single device
+                                 # metrics when the devices are the same type/model; mixed types,
+                                 # e.g. cuda+cpu, differ at float level — TF32 on the CUDA side).
+                                 # No-op with a single device
 
     def resolved_m_sep(self) -> float:
         return self.m_sep if self.m_sep is not None else math.sqrt(self.D * self.v0) / 2.0
