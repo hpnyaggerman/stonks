@@ -3,3 +3,4 @@
 torch>=2.1
 pandas>=2.0
 numpy>=1.24
+pyarrow>=14.0  # only needed for data_format="parquet"

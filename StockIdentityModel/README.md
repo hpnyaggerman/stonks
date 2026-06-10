@@ -74,6 +74,17 @@ CPU property; on CUDA, scatter/`index_add` use non-deterministic atomics, so res
 diverge at floating-point noise level (distributional state — anchors, EMA normalizers, queues —
 is restored exactly).
 
+`--resume` validates run identity before touching anything: every run-permanent config field
+(data layout, sampler structure, architecture, loss geometry, schedule shape, eval
+protocol/selector) must match the checkpoint's, and the rebuilt dataset must match the
+checkpoint's `data_meta` (catches raw files changing underneath a run). Only operational knobs
+(`config.KNOB_FIELDS`: device, threads, cadences, `max_steps`, `run_dir`, data paths,
+`grad_checkpoint`, …) may differ — resume with the run's own `--config <run_dir>/config.json`
+and change knobs from there. The running best selection score rides in every checkpoint, so a
+resumed run continues the `best.pt` comparison where it left off instead of overwriting
+`best.pt` at its first eval (pre-fix behavior); legacy checkpoints without the field fall back
+to the old restart-at−∞ behavior.
+
 `best.pt` tracks the highest held-out retrieval accuracy — the acceptance metric: tickers held
 out of training entirely must stay consistent across windows and find themselves by nearest
 neighbor against the trained gallery. `latest.pt` is written at every eval. Both store full
@@ -105,6 +116,55 @@ Whatever the selector, the retrieval column stays the acceptance read.
 | `evaluate.py` | held-out consistency + retrieval, partition-redraw agreement |
 | `export.py` | artifact: weights + context recipe + canonical embedding table |
 | `inference.py` | `embed()` for arbitrary tickers from an artifact |
+
+## Data backends and cross-market mode
+
+Two input backends (`data_format`): `"csv"` — the historical per-ticker
+`{TICKER}_daily.csv` files; `"parquet"` — long-format shards
+(`ticker, exchange, date, OHLCV`) under `parquet_dir`, filtered to
+`exchanges` (default US). `min_history_days` drops tickers with too few usable
+days on their own market grid; its default is backend-dependent — 252
+(~1 trading year) for parquet, 0 (off) for csv — so a default csv run keeps
+the historical unfiltered 347-ticker universe. An explicit value applies to
+either backend.
+
+**Cross-market mode** (`cross_market=True` / `--cross-market`, parquet only,
+**off by default** — the committed defaults are byte-identical to the
+single-market pipeline, verified by hash):
+
+- **Per-market grids.** `exchange_market_map` assigns each exchange to a market
+  (default: US exchanges → "US", Shanghai/Shenzhen → "CN"). Each market gets
+  its own trading-day calendar (US = SPY benchmark; secondary = union of own
+  tickers' dates, kept only where ≥ `min_calendar_quorum` tickers have a bar,
+  so one rogue date can't hole everyone) and its own backward N-day tiling,
+  completeness mask, feature tensor, pool, and holdout (the US holdout draw is
+  seed-identical to single-market mode; secondary markets draw their own).
+- **Dominance-paired windows.** Each drawn US window derives one window per
+  secondary market: the latest own-calendar window whose day-k date never falls
+  after the US window's day-k date, for every k (endpoint alignment is not
+  enough — the calendars' day-counting drifts within a span). Derived windows
+  co-reside in the same training step; windows that predate a market's history
+  are skipped (logged per step as `windows_mkt`).
+- **Groups never span markets**, so the three-view leak closure, contemporaneity,
+  and the ω noise model see same-calendar peers only. Cross-market coupling
+  happens solely through the population terms — xsep separates different
+  tickers across the union, util's variance floor and the syn/EMA pooling see
+  both markets — which is exactly the union-distinctiveness effect the mode
+  exists for. The encoder remains market-blind (no market id, no dates).
+- **Eval**: legacy (US) columns keep their exact single-market definitions;
+  secondary markets add prefixed columns (`cn_consistency_*`, `cn_retrieval_acc`,
+  `cn_margin_ratio` — scored against the union gallery — and
+  `cn_partition_agreement`). The stratified selection metrics become
+  union-protocol (queries from every market's holdout, union gallery); the
+  US-protocol values move to `*_stratified_us`. `market_centroid_acc`/`_dist`
+  log whether "market" is a separating axis (the instrument that decides
+  whether any binding term is ever needed).
+- **Artifacts** carry one context recipe per market; the embedding table spans
+  all markets; `inference.py` resolves a ticker's market from the recipe (or
+  `--market`) and embeds it against its own calendar's context windows. Parquet
+  artifacts bulk-load context candles from the shards.
+- Memory: both markets' panels and features stay resident (full US+CN ≈ a few
+  GB); per-step compute roughly doubles (both markets encoded per step).
 
 ## Design notes
 

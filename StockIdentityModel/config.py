@@ -54,10 +54,34 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# exchange -> market for cross-market mode. Every ticker maps to exactly one
+# exchange in the shipped parquet (verified: 0 of 13,026 span two), so this
+# also assigns each ticker to exactly one market calendar.
+DEFAULT_EXCHANGE_MARKET_MAP = {
+    "NASDAQ": "US", "NYSE": "US", "AMEX": "US", "BATS": "US",
+    "NYSE MKT": "US", "NYSE NAT": "US", "NYSE ARCA": "US",
+    "SHE": "CN", "SHG": "CN", "SHGB": "CN", "SHEB": "CN",
+}
+
+# Config fields an operator may change when resuming (--resume): host placement,
+# cadences, output location, the run horizon, and data *paths* (data content
+# identity is enforced separately against the checkpoint's data_meta). Every
+# other field is run-permanent — data layout, sampler structure, architecture,
+# loss geometry, schedule shape, eval protocol/selector — and train.py refuses
+# to resume if any of them differs: splicing two configs into one curve is the
+# confounding doctrine point 2 forbids, and the restored best-score is only
+# comparable while best_metric and the eval protocol stay fixed. max_steps is a
+# knob so finished runs can be extended; note that extending stretches the
+# cosine LR horizon going forward.
+KNOB_FIELDS = frozenset({
+    "run_dir", "device", "num_threads", "grad_checkpoint", "grad_diag_every",
+    "eval_every", "max_steps", "K_inf", "calibrate_init", "raw_dir", "parquet_dir",
+})
 
 
 @dataclass
@@ -77,6 +101,33 @@ class Config:
                                  # delta in [0, N) per sampler epoch — same 104 fixed inputs
                                  # repeated ~1500x fed the r3 memorization; eval/export keep
                                  # the fixed (delta=0) tiling
+    data_format: str = "csv"     # "csv" = per-ticker {TICKER}_daily.csv under raw_dir/stocksData;
+                                 # "parquet" = long-format shards (ticker,exchange,date,OHLCV)
+    parquet_dir: str = "TrainingData/ohlcv_parts"   # dir of *.parquet shards (data_format=parquet)
+    exchanges: tuple[str, ...] | None = (           # parquet, cross_market=False only: keep these
+        "NASDAQ", "NYSE", "AMEX", "BATS", "NYSE MKT", "NYSE NAT", "NYSE ARCA",
+    )                            # exchanges on the single (US) grid; None = all. With
+                                 # cross_market=True this is ignored — the exchange_market_map
+                                 # decides membership and each market gets its own grid.
+    min_history_days: int | None = None  # drop tickers with fewer than this many usable grid-days
+                                 # (counted on the ticker's own market grid). None -> backend
+                                 # default: 252 (~1 trading year) for parquet, 0 (filter off) for
+                                 # csv — a default csv run keeps the historical unfiltered
+                                 # universe. An explicit value applies to either backend; 0 disables
+    cross_market: bool = False   # include non-US markets on their own calendars (parquet only).
+                                 # Per-market grids + window tiling; Chinese windows are derived
+                                 # from each drawn US window by the per-day dominance rule (CN day
+                                 # k never after US day k) and co-reside in the same training
+                                 # step; attention groups stay single-market, so only the
+                                 # population terms (xsep/util/syn pooling) span markets
+    exchange_market_map: dict[str, str] = field(   # exchange -> market (cross_market only)
+        default_factory=lambda: dict(DEFAULT_EXCHANGE_MARKET_MAP)
+    )
+    min_calendar_quorum: int = 5 # cross_market union grids only: a date enters a market's grid
+                                 # only if >= this many of its tickers have a bar — a lone rogue
+                                 # date in one file would otherwise hole every ticker's
+                                 # completeness in the windows spanning it (no benchmark CSV
+                                 # exists for non-US markets, so their grids come from unions)
 
     # --- model ---
     D: int = 32                  # embedding dimension
@@ -178,6 +229,11 @@ class Config:
 
     def resolved_m_sep(self) -> float:
         return self.m_sep if self.m_sep is not None else math.sqrt(self.D * self.v0) / 2.0
+
+    def resolved_min_history_days(self) -> int:
+        if self.min_history_days is not None:
+            return self.min_history_days
+        return 252 if self.data_format == "parquet" else 0
 
     def resolved_device(self) -> str:
         if self.device == "auto":

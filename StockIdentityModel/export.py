@@ -52,32 +52,36 @@ def export_artifact(checkpoint: str | Path, out_dir: str | Path, device: str | N
     }
     (out / "config.json").write_text(json.dumps(config_doc, indent=2))
 
-    # 2. context-fetch recipe: the last K_inf windows and their context tickers
-    inf_windows = ds.usable_windows[-cfg.K_inf :]
-    recipe = {
-        "K_inf": cfg.K_inf,
-        "windows": [
+    # 2. context-fetch recipe: the last K_inf windows and their context tickers —
+    # per market in cross-market mode (each market's windows live on its own calendar)
+    def _market_windows(mkt) -> list[dict]:
+        return [
             {
                 "window_id": int(w),
-                "start": ds.window_dates(w)[0],
-                "end": ds.window_dates(w)[1],
-                "dates": ds.window_date_list(w),
-                "context_tickers": [ds.tickers[i] for i in ds.train_universe(w)],
+                "start": mkt.window_dates(w)[0],
+                "end": mkt.window_dates(w)[1],
+                "dates": mkt.window_date_list(w),
+                "context_tickers": [ds.tickers[i] for i in mkt.train_universe(w)],
             }
-            for w in inf_windows
-        ],
-    }
+            for w in mkt.usable_windows[-cfg.K_inf :]
+        ]
+
+    recipe = {"K_inf": cfg.K_inf, "windows": _market_windows(ds.us)}
+    if cfg.cross_market:
+        recipe["markets"] = {m.name: {"windows": _market_windows(m)} for m in ds.secondary}
     (out / "context_recipe.json").write_text(json.dumps(recipe, indent=2))
 
     # 3. canonical embedding table, recomputed through the inference recipe
     # (deterministic full view, single group, averaged over the last K_inf windows)
     # rather than copied from training anchors, so training tickers and unseen
-    # tickers land in directly comparable coordinates.
+    # tickers land in directly comparable coordinates. Cross-market: every
+    # market's tickers, each embedded on its own calendar, in one table.
     acc: dict[int, list[np.ndarray]] = {}
-    for w in inf_windows:
-        uni, Z, _ = window_embeddings(model, ds, w)
-        for k, t in enumerate(uni):
-            acc.setdefault(int(t), []).append(Z[k])
+    for mkt in ds.markets.values():
+        for w in mkt.usable_windows[-cfg.K_inf :]:
+            uni, Z, _ = window_embeddings(model, ds, w, mkt)
+            for k, t in enumerate(uni):
+                acc.setdefault(int(t), []).append(Z[k])
     rows = []
     for t in sorted(acc.keys()):
         z = np.stack(acc[t]).mean(0)

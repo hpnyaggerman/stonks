@@ -28,6 +28,7 @@ class StepStore:
     gsize: list = field(default_factory=list)    # observer's group size
     z: dict = field(default_factory=lambda: {v: [] for v in VIEWS})
     slices: list = field(default_factory=list)   # per (slot, scale): (start, end, group_id array)
+    market_windows: dict = field(default_factory=dict)  # cross-market: secondary windows landed this step
 
     def add(self, tickers, slot, t_w, scale, gsizes, group_ids, z_full, z_self, z_peer):
         start = len(self.ticker)
