@@ -13,6 +13,8 @@ values are kept under *_us keys for comparability with single-market runs.
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import torch
 
@@ -20,6 +22,34 @@ from .config import Config
 from .data import StockData, ladder
 from .model import IdentityEncoder
 from .sampling import draw_partitions, split_strata
+
+
+def _per_window_embeddings(replicas: list, ds: StockData, windows, mkt=None) -> dict[int, tuple]:
+    """per_win dict over `windows`, optionally split across model replicas on
+    different devices (one host thread per replica; CUDA ops release the GIL).
+    Byte-identical to the single-replica path: eval is deterministic, no_grad,
+    and per-window independent — the split only changes who computes what."""
+    windows = sorted(windows)
+    if len(replicas) <= 1 or len(windows) <= 1:
+        return {w: window_embeddings(replicas[0], ds, w, mkt) for w in windows}
+    out: dict[int, tuple] = {}
+    lock = threading.Lock()
+
+    def work(rep, wins):
+        for w in wins:
+            r = window_embeddings(rep, ds, w, mkt)
+            with lock:
+                out[w] = r
+
+    threads = [
+        threading.Thread(target=work, args=(rep, windows[i :: len(replicas)]))
+        for i, rep in enumerate(replicas)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return out
 
 
 @torch.no_grad()
@@ -181,7 +211,7 @@ def _partition_agreement(model: IdentityEncoder, cfg: Config, mkt) -> float:
     return float(within_ticker / inter) if inter else float("nan")
 
 
-def _cross_market_eval(model, ds, cfg, per_win_us, us_eval, us_strat, strat_us_vals) -> dict:
+def _cross_market_eval(model, ds, cfg, per_win_us, us_eval, us_strat, strat_us_vals, replicas=None) -> dict:
     """Secondary-market metrics + union-protocol stratified selection metrics.
 
     Per secondary market m (key prefix = lowercased market name):
@@ -203,7 +233,7 @@ def _cross_market_eval(model, ds, cfg, per_win_us, us_eval, us_strat, strat_us_v
         pre = mkt.name.lower() + "_"
         m_eval = mkt.usable_windows[-cfg.eval_windows:]
         m_strat = stratified_eval_windows(ds, cfg, mkt) if us_strat else []
-        per_win_m = {w: window_embeddings(model, ds, w, mkt) for w in sorted(set(m_eval) | set(m_strat))}
+        per_win_m = _per_window_embeddings(replicas or [model], ds, set(m_eval) | set(m_strat), mkt)
         tr, ho = _series(per_win_m, m_eval)
         m_tc = [_mean_pairwise(np.stack(v)) for v in tr.values() if len(v) >= 2]
         m_hc = [_mean_pairwise(np.stack(v)) for v in ho.values() if len(v) >= 2]
@@ -264,9 +294,13 @@ def _cross_market_eval(model, ds, cfg, per_win_us, us_eval, us_strat, strat_us_v
 
 
 @torch.no_grad()
-def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
+def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config, replicas: list | None = None) -> dict:
     was_training = model.training
     model.eval()
+    # replicas (model + per-device mirrors, weights already synced by the caller)
+    # only split the per-window work when eval_parallel is on; metrics are
+    # byte-identical either way
+    reps = replicas if (cfg.eval_parallel and replicas and len(replicas) > 1) else [model]
     cross = bool(cfg.cross_market and ds.secondary)
     eval_windows = ds.us.usable_windows[-cfg.eval_windows:]
     strat_windows = (
@@ -274,9 +308,7 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
         if (cfg.best_metric in ("consistency", "margin") or cross)
         else []
     )
-    per_win: dict[int, tuple] = {
-        w: window_embeddings(model, ds, w, ds.us) for w in sorted(set(eval_windows) | set(strat_windows))
-    }
+    per_win: dict[int, tuple] = _per_window_embeddings(reps, ds, set(eval_windows) | set(strat_windows), ds.us)
 
     # --- across-window consistency: holdout vs trained ---
     train_series, hold_series = _series(per_win, eval_windows)
@@ -323,7 +355,7 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config) -> dict:
         **strat,
     }
     if cross:
-        out.update(_cross_market_eval(model, ds, cfg, per_win, eval_windows, strat_windows, strat))
+        out.update(_cross_market_eval(model, ds, cfg, per_win, eval_windows, strat_windows, strat, replicas=reps))
     if was_training:
         model.train()
     return out

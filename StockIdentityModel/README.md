@@ -61,12 +61,47 @@ instead of the `+cpu` wheel above. Recommended on a 24 GB card:
 python -m StockIdentityModel.train --run-dir StockIdentityModel/runs/r1 --no-grad-checkpoint
 ```
 
-(`grad_checkpoint` exists to fit the ~3 GB of temporal-encoder activations into small-RAM CPU
-boxes; with VRAM headroom, disabling it removes the recompute and is faster.) TF32 matmuls are
-enabled automatically on CUDA. The model is ~1M parameters — one GPU per run; use a second GPU
-for a parallel run (different seed / `lambda_syn`) via `CUDA_VISIBLE_DEVICES=1`. Multi-GPU
-training of a single run is not supported: a step's loss couples all windows/scales globally
-(synergy, utilization, anchors), and the model is far too small to justify sharding it.
+(`grad_checkpoint` exists to fit the temporal-encoder activations in memory; disabling it is
+faster only at csv scale — at parquet scale keep it on.) TF32 matmuls are enabled automatically
+on CUDA.
+
+The model is ~1M parameters; what doesn't fit at parquet scale is a *step's activations* —
+~170 GB saved-for-backward across the 16 coexisting (window, market) job graphs, plus O(n²)
+loss-stage matrices (xsep alone is a 26–58 GB allocation). Two exact-recompute knobs make a
+step fit one 24 GB card (~10–13 GB peak, ~+30% step time):
+
+```bash
+python -m StockIdentityModel.train --run-dir ... --data-format parquet --cross-market \
+    --context-checkpoint --loss-chunk 1024
+```
+
+`--context-checkpoint` recomputes each (window, scale) three-view context pass during backward;
+only the [rows, D] embeddings and the explicit dropout masks persist across the step. The masks
+enter the checkpoint as arguments, so segments contain no RNG — gradients *and* the draw stream
+are identical to the unflagged step. `--loss-chunk N` computes the O(n²) separation terms
+(xsep/psep) in checkpointed chunks — same sums, float reduction order aside. Both are
+recomputation, not approximation. Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+against allocator fragmentation at this scale.
+
+Multi-GPU of a single run is supported as *job placement under the one global loss* —
+independent of the checkpointing knobs and composable with them:
+
+```bash
+python -m StockIdentityModel.train ... --devices cuda:0,cuda:1 --eval-parallel
+```
+
+`--devices` mirrors the weights to each listed device per step, forwards each (window, market)
+job on a device chosen by a fixed slot rule (a US window and its derived secondary partner land
+on different devices), gathers every job's embeddings to the first device mid-graph, computes
+the single population-coupled loss there exactly as in single-device mode, and runs one
+backward across all devices; mirror gradients are summed into the master *before* the global
+`clip_norm` clip. The loss is never sharded — gradients equal the single-device step up to
+float reassociation (~1.7–1.9× throughput). Caveat: per-device dropout RNG makes a multi-GPU
+run a different draw realization than a single-GPU run of the same seed (numpy draws —
+windows, partitions, offsets, holdout — stay identical); paired runs must hold `--devices`
+fixed. `--eval-parallel` window-splits the deterministic no-grad eval across the same devices —
+byte-identical metrics, ~2× faster evals. A second GPU can still be spent on a parallel run
+instead (`CUDA_VISIBLE_DEVICES=1`) when comparing recipes.
 
 Checkpoints and artifacts are machine-portable (loaded via `map_location`, artifact weights
 saved on CPU): train on GPU, export/infer anywhere. Caveat: bit-exact `--resume` replay is a

@@ -77,10 +77,14 @@ DEFAULT_EXCHANGE_MARKET_MAP = {
 # confounding doctrine point 2 forbids, and the restored best-score is only
 # comparable while best_metric and the eval protocol stay fixed. max_steps is a
 # knob so finished runs can be extended; note that extending stretches the
-# cosine LR horizon going forward.
+# cosine LR horizon going forward. context_checkpoint/loss_chunk are exact
+# recomputation (values unchanged); devices is placement — toggling it forks the
+# per-device dropout realization, the same documented class as moving the
+# existing `device` knob between hosts (paired runs hold it fixed).
 KNOB_FIELDS = frozenset({
     "run_dir", "device", "num_threads", "grad_checkpoint", "grad_diag_every",
     "eval_every", "max_steps", "K_inf", "calibrate_init", "raw_dir", "parquet_dir",
+    "context_checkpoint", "loss_chunk", "devices", "eval_parallel",
 })
 
 
@@ -227,6 +231,35 @@ class Config:
     device: str = "auto"         # "auto" -> cuda if available, else cpu; or "cpu" / "cuda" / "cuda:N"
     num_threads: int = 4
 
+    # --- memory / parallelism (independent, default-off knobs; defaults = historical path) ---
+    context_checkpoint: bool = False  # recompute each (window, scale) three-view context pass during
+                                 # backward instead of holding its activations across the step: only
+                                 # the [rows, D] embeddings and the explicit dropout masks persist.
+                                 # The masks enter the checkpoint as arguments, so segments contain
+                                 # no RNG — recompute is deterministic and gradients are identical
+                                 # to the unflagged step (a step's saved-for-backward set drops
+                                 # ~170 GB -> ~10 GB at parquet scale for ~+30% step time)
+    loss_chunk: int = 0          # > 0: compute the O(n^2) separation terms in checkpointed pieces —
+                                 # xsep in row-chunks of this size (1024 keeps recompute transients
+                                 # ~2 GB at parquet scale; the monolithic [n_seg, n_seg] matrix is
+                                 # 26-58 GB there), psep per (slot, scale) slice. Same sums; only
+                                 # float reduction order differs. 0 = monolithic (historical)
+    devices: str | None = None   # comma-separated devices for single-RUN job parallelism, e.g.
+                                 # "cuda:0,cuda:1": weights are mirrored to each device per step,
+                                 # (window, market) jobs are placed by a fixed slot rule (a US
+                                 # window and its derived secondary partner land on different
+                                 # devices), every job's embeddings are gathered to the first
+                                 # device mid-graph and the ONE global loss is computed there —
+                                 # never sharded — then mirror grads are summed into the master
+                                 # BEFORE the global clip. None = single device (cfg.device).
+                                 # Per-device dropout RNG makes a multi-device run a different
+                                 # draw realization than a single-device run of the same seed
+                                 # (numpy streams — windows/partitions/offsets/holdout — are
+                                 # unchanged); paired runs must hold this fixed
+    eval_parallel: bool = False  # split eval windows across `devices` replicas (eval is no_grad +
+                                 # deterministic and per-window independent -> byte-identical
+                                 # metrics). No-op with a single device
+
     def resolved_m_sep(self) -> float:
         return self.m_sep if self.m_sep is not None else math.sqrt(self.D * self.v0) / 2.0
 
@@ -234,6 +267,11 @@ class Config:
         if self.min_history_days is not None:
             return self.min_history_days
         return 252 if self.data_format == "parquet" else 0
+
+    def resolved_devices(self) -> list[str]:
+        if self.devices:
+            return [d.strip() for d in self.devices.split(",") if d.strip()]
+        return [self.resolved_device()]
 
     def resolved_device(self) -> str:
         if self.device == "auto":

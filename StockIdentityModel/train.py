@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from .config import KNOB_FIELDS, Config, REPO_ROOT
 from .data import StockData, ladder
@@ -119,10 +120,45 @@ def draw_observer_dropout(real: torch.Tensor, p_attn: float) -> torch.Tensor:
     return keep
 
 
-def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]], cfg: Config, offset: int = 0) -> StepStore:
+def _context_views_segment(ctx, H, order_t, gid_t, pos_t, real, vis_peers, *ff_masks):
+    """Checkpoint segment for one (window, scale): group scatter + three views +
+    row gather. Contains NO RNG — the dropout masks enter as tensor arguments —
+    so backward recompute is deterministic and gradient-exact. Only the [rows, D]
+    outputs (and the argument tensors) survive the step; do not add stochastic
+    ops in here."""
+    Hg = H.new_zeros(real.shape[0], real.shape[1], H.shape[1])
+    Hg[gid_t, pos_t] = H[order_t]
+    z_full, z_self, z_peer = ctx.views(Hg, vis_peers, real, list(ff_masks) or None)
+    return z_full[gid_t, pos_t], z_self[gid_t, pos_t], z_peer[gid_t, pos_t]
+
+
+def _sync_mirrors(model: IdentityEncoder, mirrors: list) -> None:
+    """Copy master weights into each device mirror (the model has no buffers,
+    so the parameters are the complete state; ~4 MB per mirror)."""
+    with torch.no_grad():
+        for mir in mirrors:
+            for pm, pr in zip(model.parameters(), mir.parameters()):
+                pr.copy_(pm, non_blocking=True)
+
+
+def _merge_mirror_grads(model: IdentityEncoder, mirrors: list, dev: torch.device) -> None:
+    """Sum each mirror's gradients into the master's. Must run after backward and
+    BEFORE clip_grad_norm_: the global clip has to see the full cross-device
+    gradient (by the weight-sharing identity, master+mirror grads at equal
+    weights sum to the single-device gradient exactly)."""
+    for mir in mirrors:
+        for pm, pr in zip(model.parameters(), mir.parameters()):
+            if pr.grad is not None:
+                g = pr.grad.to(dev)
+                pm.grad = g if pm.grad is None else pm.grad.add_(g)
+                pr.grad = None
+
+
+def run_step(replicas: list, devs: list, ds: StockData, draws: list[tuple[int, int]], cfg: Config, offset: int = 0) -> StepStore:
     """One step's forward pass: encode each drawn window once, then group and
     run the three views per scale. `offset` shifts the whole tiling (one value
-    per sampler epoch); 0 = the fixed tiling.
+    per sampler epoch); 0 = the fixed tiling. `replicas[i]` is the model copy on
+    `devs[i]`; replicas[0] is the master (single-device mode: just [model]).
 
     Cross-market mode: each drawn US window also derives one window per
     secondary market via the per-day dominance rule (no secondary day k may
@@ -131,9 +167,15 @@ def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]]
     pooling) span the union, while attention groups stay single-market. The
     derived window reuses its US partner's ordinal as t_w: kappa pairs are
     within-ticker (hence within-market), and the derived span trails its
-    partner by far less than one window unit, so era distances stay correct."""
+    partner by far less than one window unit, so era distances stay correct.
+
+    Multi-device placement is a fixed slot rule — US window slot s on device
+    (s % D), its derived market-mi partner on ((s + mi) % D), anti-pairing the
+    two largest covarying jobs — and every job's embedding rows are gathered to
+    devs[0] mid-graph (`.to` is a no-op on devs[0] jobs), where the one global
+    loss is computed. Gradients route back through the copy nodes."""
     store = StepStore()
-    dev = next(model.parameters()).device
+    D = len(replicas)
     jobs: list[tuple[int, float, object, int, "np.ndarray", tuple]] = []
     n_sec = {m.name: 0 for m in ds.secondary}
     for slot, (w, visit) in enumerate(draws):
@@ -157,11 +199,15 @@ def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]]
                 jobs.append((mi * len(draws) + slot, float(w), mkt, ca, cuni, (w, visit, mi)))
                 n_sec[mkt.name] += 1
     store.market_windows = n_sec
-    for slot, t_w, mkt, a, uni, seed in jobs:
-        U = len(uni)
+    # partitions drawn up front: each draw_partitions call seeds its own rng, so
+    # hoisting them out of the compute loop is draw-identical — and it keeps
+    # host-side numpy from starving the device queues in multi-device mode
+    parts_by_job = [draw_partitions(len(uni), ladder(len(uni), cfg.Y), seed=seed) for *_, uni, seed in jobs]
+    for (slot, t_w, mkt, a, uni, _), parts in zip(jobs, parts_by_job):
+        di = (slot % len(draws) + slot // len(draws)) % D
+        mdl, dev = replicas[di], devs[di]
         x = torch.from_numpy(mkt.window_feats_at(uni, a)).to(dev)
-        H = model.encode_window(x, grad_checkpoint=cfg.grad_checkpoint)
-        parts = draw_partitions(U, ladder(U, cfg.Y), seed=seed)
+        H = mdl.encode_window(x, grad_checkpoint=cfg.grad_checkpoint)
         for n_s, groups in parts.items():
             lengths = np.array([len(g) for g in groups])
             g_max = int(lengths.max())
@@ -172,24 +218,31 @@ def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]]
             gid_t = torch.from_numpy(gid).to(dev)
             pos_t = torch.from_numpy(pos).to(dev)
 
-            Hg = H.new_zeros(len(groups), g_max, H.shape[1])
-            Hg[gid_t, pos_t] = H[order_t]
             real = torch.zeros(len(groups), g_max, dtype=torch.bool, device=dev)
             real[gid_t, pos_t] = True
 
-            if model.training and cfg.p_attn > 0:
+            if mdl.training and cfg.p_attn > 0:
                 vis_peers = draw_observer_dropout(real, cfg.p_attn)
             else:
                 eye = torch.eye(g_max, dtype=torch.bool, device=dev)
                 vis_peers = (real[:, :, None] & real[:, None, :]) & ~eye[None]
             ff_masks = None
-            if model.training and cfg.p_ff > 0:
+            if mdl.training and cfg.p_ff > 0:
                 ff_masks = [
                     (torch.rand(len(groups), g_max, cfg.d_ff, device=dev) >= cfg.p_ff).float() / (1.0 - cfg.p_ff)
                     for _ in range(cfg.L_ctx)
                 ]
 
-            z_full, z_self, z_peer = model.context.views(Hg, vis_peers, real, ff_masks)
+            if cfg.context_checkpoint and mdl.training:
+                zf, zs, zp = checkpoint(
+                    _context_views_segment, mdl.context, H, order_t, gid_t, pos_t,
+                    real, vis_peers, *(ff_masks or ()), use_reentrant=False,
+                )
+            else:
+                Hg = H.new_zeros(len(groups), g_max, H.shape[1])
+                Hg[gid_t, pos_t] = H[order_t]
+                z_full, z_self, z_peer = mdl.context.views(Hg, vis_peers, real, ff_masks)
+                zf, zs, zp = z_full[gid_t, pos_t], z_self[gid_t, pos_t], z_peer[gid_t, pos_t]
             store.add(
                 tickers=uni[order],
                 slot=slot,
@@ -197,9 +250,9 @@ def run_step(model: IdentityEncoder, ds: StockData, draws: list[tuple[int, int]]
                 scale=n_s,
                 gsizes=lengths[gid],
                 group_ids=gid,
-                z_full=z_full[gid_t, pos_t],
-                z_self=z_self[gid_t, pos_t],
-                z_peer=z_peer[gid_t, pos_t],
+                z_full=zf.to(devs[0]),
+                z_self=zs.to(devs[0]),
+                z_peer=zp.to(devs[0]),
             )
     return store
 
@@ -287,8 +340,9 @@ def train(cfg: Config, resume: str | None = None) -> Path:
             )
     torch.set_num_threads(cfg.num_threads)
     torch.manual_seed(cfg.train_seed)
-    dev = torch.device(cfg.resolved_device())
-    if dev.type == "cuda":
+    devs = [torch.device(d) for d in cfg.resolved_devices()]
+    dev = devs[0]  # primary: master model, loss, anchors, optimizer, eval
+    if any(d.type == "cuda" for d in devs):
         torch.set_float32_matmul_precision("high")  # TF32 matmuls on Ampere+
     run_dir = REPO_ROOT / cfg.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -307,12 +361,18 @@ def train(cfg: Config, resume: str | None = None) -> Path:
                 "refusing to resume: the dataset no longer matches the checkpoint's data_meta "
                 "(raw data changed underneath the run):\n" + detail
             )
-    print(f"[device] {dev}")
+    print(f"[device] {', '.join(str(d) for d in devs)}")
     print(f"[data] {json.dumps({k: v for k, v in meta.items() if k != 'holdout'})}")
     print(f"[data] holdout ({meta['holdout_size']}): {' '.join(meta['holdout'])}")
     (run_dir / "data_meta.json").write_text(json.dumps(meta, indent=2))
 
     model = IdentityEncoder(cfg).to(dev)
+    # mirrors under a forked RNG: building them must not perturb the master's
+    # init stream, so single- and multi-device fresh runs start from identical
+    # weights; mirror weights are overwritten by _sync_mirrors every step anyway
+    with torch.random.fork_rng(devices=[]):
+        mirrors = [IdentityEncoder(cfg).to(d) for d in devs[1:]]
+    replicas = [model] + mirrors
     if cfg.calibrate_init and not resume:
         calib = calibrate_output_scale(model, ds, cfg)
         (run_dir / "calibration.json").write_text(json.dumps(calib, indent=2))
@@ -335,11 +395,19 @@ def train(cfg: Config, resume: str | None = None) -> Path:
     log_f = open(run_dir / "train_log.jsonl", "a")
     eval_f = open(run_dir / "eval_log.jsonl", "a")
 
+    cuda_devs = [d for d in devs if d.type == "cuda"]
+
     for step in range(start_step + 1, cfg.max_steps + 1):
         t0 = time.time()
+        for d in cuda_devs:
+            torch.cuda.reset_peak_memory_stats(d)
         model.train()
+        if mirrors:
+            for mir in mirrors:
+                mir.train()
+            _sync_mirrors(model, mirrors)  # post-opt.step() weights from the previous step
         draws = sampler.draw()  # may roll the epoch: offset is fixed after this call until the next refill
-        store = run_step(model, ds, draws, cfg, offset=sampler.offset)
+        store = run_step(replicas, devs, ds, draws, cfg, offset=sampler.offset)
         batch = store.finalize(device=dev)
         idx = StepIndex(batch, cfg, ds.tau_prox)
         terms, I, I_per_ticker, present, zbar, spectrum = step_losses(cfg, batch, idx, ds.T, anchors)
@@ -355,6 +423,7 @@ def train(cfg: Config, resume: str | None = None) -> Path:
             g["lr"] = lr
         opt.zero_grad(set_to_none=True)
         total.backward()
+        _merge_mirror_grads(model, mirrors, dev)  # no-op single-device; must precede the global clip
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm)
         opt.step()
         anchor_stats = anchors.update(present, zbar, I_per_ticker)
@@ -394,6 +463,8 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         if force is not None:
             rec["force"] = force
             rec["denom"] = {k: float(v) for k, v in norm.last_denom.items()}
+        if cuda_devs:
+            rec["mem_gb"] = {str(d): round(torch.cuda.max_memory_allocated(d) / 1e9, 3) for d in cuda_devs}
         log_f.write(json.dumps(rec) + "\n")
         log_f.flush()
         if step % 10 == 0 or step == start_step + 1:
@@ -406,7 +477,9 @@ def train(cfg: Config, resume: str | None = None) -> Path:
             )
 
         if step % cfg.eval_every == 0 or step == cfg.max_steps:
-            metrics = run_eval(model, ds, cfg)
+            if cfg.eval_parallel and mirrors:
+                _sync_mirrors(model, mirrors)  # mirrors are one opt.step stale at this point
+            metrics = run_eval(model, ds, cfg, replicas=replicas)
             metrics["step"] = step
             eval_f.write(json.dumps(metrics) + "\n")
             eval_f.flush()
@@ -458,6 +531,27 @@ def main():
         "secondary windows are derived from US windows by the per-day dominance rule and "
         "co-reside in the training step, with attention groups staying single-market",
     )
+    ap.add_argument(
+        "--context-checkpoint", action="store_true",
+        help="recompute each (window, scale) context pass during backward (exact: identical "
+        "gradients and draws; cuts step activation memory ~15x at parquet scale for ~+30% time)",
+    )
+    ap.add_argument(
+        "--loss-chunk", type=int, default=None,
+        help="compute the O(n^2) separation terms (xsep/psep) in checkpointed chunks of this many "
+        "rows (1024 recommended at parquet scale; same sums, reduction order aside); 0 = monolithic",
+    )
+    ap.add_argument(
+        "--devices", default=None,
+        help='comma-separated devices for single-RUN job parallelism, e.g. "cuda:0,cuda:1": jobs '
+        "are placed by a fixed slot rule and the ONE global loss is computed on the first device "
+        "(never sharded); composable with, but independent of, --context-checkpoint",
+    )
+    ap.add_argument(
+        "--eval-parallel", action="store_true",
+        help="split eval windows across --devices (eval is deterministic and per-window "
+        "independent: byte-identical metrics, ~2x faster evals)",
+    )
     ap.add_argument("--no-window-offset", action="store_true", help="train on the fixed tiling only (disable per-epoch offsets)")
     ap.add_argument(
         "--no-grad-checkpoint",
@@ -470,10 +564,15 @@ def main():
     if args.run_dir:
         cfg.run_dir = args.run_dir
     for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric",
-              "strat_eval_windows", "data_format", "parquet_dir", "min_history_days"):
+              "strat_eval_windows", "data_format", "parquet_dir", "min_history_days",
+              "loss_chunk", "devices"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)
+    if args.context_checkpoint:
+        cfg.context_checkpoint = True
+    if args.eval_parallel:
+        cfg.eval_parallel = True
     if args.exchanges is not None:
         cfg.exchanges = None if args.exchanges.strip().lower() == "all" else tuple(
             s.strip() for s in args.exchanges.split(",") if s.strip()

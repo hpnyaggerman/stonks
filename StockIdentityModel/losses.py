@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from .config import Config
 
@@ -80,6 +81,29 @@ def _segment_mean(values: torch.Tensor, seg_id: torch.Tensor, n_seg: int) -> tor
     return out / cnt[:, None]
 
 
+def _xsep_chunk(mu_rows, mu, st_rows, st, ss_rows, ss, m_sep: float) -> torch.Tensor:
+    """One row-chunk of the cross-scale separation sum (checkpointed under
+    cfg.loss_chunk: the distance block is recomputed during backward instead of
+    held across the step — the monolithic [n_seg, n_seg] matrix is tens of GB at
+    parquet scale). (h * valid)^2 sums to the same value AND gradient as
+    h[valid]^2 — valid is 0/1 and h >= 0 — without the host-syncing gather."""
+    d = _safe_dist(mu_rows, mu)
+    valid = (st_rows[:, None] != st[None, :]) & (ss_rows[:, None] != ss[None, :])
+    h = torch.clamp(m_sep - d, min=0.0)
+    return (h * valid).pow(2).sum()
+
+
+def _psep_slice(zs, gid_t, m_sep: float) -> torch.Tensor:
+    """One (slot, scale) slice of the peer-separation sum — the monolithic path's
+    ops verbatim, checkpointed so the [n, n] distance matrix is recomputed during
+    backward instead of held across the step."""
+    same = gid_t[:, None] == gid_t[None, :]
+    same.fill_diagonal_(False)
+    d = _safe_dist(zs, zs)
+    h = torch.clamp(m_sep - d, min=0.0)
+    return (h[same] ** 2).sum()
+
+
 class StepIndex:
     """View-independent index structures for one step (built once, numpy)."""
 
@@ -127,6 +151,14 @@ class StepIndex:
         self.sc_seg_of_mu = torch.from_numpy(tseg)
         self.sc_count = torch.from_numpy(np.bincount(tseg).astype(np.float32))
 
+        # --- exact pair count behind xsep's mask (used by the chunked path):
+        # ordered pairs with different ticker AND different scale, by inclusion-
+        # exclusion — segments are unique (ticker, scale) keys, so the "same
+        # ticker and same scale" pairs are exactly the diagonal
+        cs = np.bincount(np.unique(self.seg_scale, return_inverse=True)[1])
+        ct = np.bincount(tseg)
+        self.xsep_pairs = int(self.n_seg ** 2 - (ct ** 2).sum() - (cs ** 2).sum() + self.n_seg)
+
 
 def view_terms(cfg: Config, B: StepBatch, idx: StepIndex, view: str, T_global: int):
     """L_sc, L_xsep, L_tc, L_psep for one view, plus per-ticker consistency summands."""
@@ -150,15 +182,26 @@ def view_terms(cfg: Config, B: StepBatch, idx: StepIndex, view: str, T_global: i
     out["sc"] = var_t[sc_eligible].sum() if sc_eligible.any() else None
 
     # --- cross-scale separation: (i, s) vs (j != i, s' != s), hinge^2 on mu distances
-    dist = _safe_dist(mu, mu)
     st = torch.from_numpy(idx.seg_ticker).to(dev)
     ss = torch.from_numpy(idx.seg_scale).to(dev)
-    valid = (st[:, None] != st[None, :]) & (ss[:, None] != ss[None, :])
-    if valid.any():
-        h = torch.clamp(m_sep - dist, min=0.0)
-        out["xsep"] = (h[valid] ** 2).mean()
+    if cfg.loss_chunk:
+        if idx.xsep_pairs:
+            acc = None
+            for r0 in range(0, idx.n_seg, cfg.loss_chunk):
+                r1 = r0 + cfg.loss_chunk
+                s_ = checkpoint(_xsep_chunk, mu[r0:r1], mu, st[r0:r1], st, ss[r0:r1], ss, m_sep, use_reentrant=False)
+                acc = s_ if acc is None else acc + s_
+            out["xsep"] = acc / idx.xsep_pairs  # == the monolithic .mean(), reduction order aside
+        else:
+            out["xsep"] = None
     else:
-        out["xsep"] = None
+        dist = _safe_dist(mu, mu)
+        valid = (st[:, None] != st[None, :]) & (ss[:, None] != ss[None, :])
+        if valid.any():
+            h = torch.clamp(m_sep - dist, min=0.0)
+            out["xsep"] = (h[valid] ** 2).mean()
+        else:
+            out["xsep"] = None
 
     # --- temporal consistency: same ticker across windows, kappa/omega-weighted pairs
     tc_per_ticker = torch.zeros(T_global, dtype=z.dtype, device=dev)
@@ -177,20 +220,33 @@ def view_terms(cfg: Config, B: StepBatch, idx: StepIndex, view: str, T_global: i
         out["tc"] = None
 
     # --- peer separation: within each group at each (slot, scale), ordered pairs
-    hinge_sum = z.new_zeros(())
-    cnt = 0
-    for start, end, gid in B.slices:
-        zs = z[start:end]
-        gid_t = torch.from_numpy(gid).to(dev)
-        same = gid_t[:, None] == gid_t[None, :]
-        same.fill_diagonal_(False)
-        if not same.any():
-            continue
-        d = _safe_dist(zs, zs)
-        h = torch.clamp(m_sep - d, min=0.0)
-        hinge_sum = hinge_sum + (h[same] ** 2).sum()
-        cnt += int(same.sum().item())
-    out["psep"] = hinge_sum / cnt if cnt else None
+    if cfg.loss_chunk:
+        hinge_sum, cnt = None, 0
+        for start, end, gid in B.slices:
+            c = np.bincount(gid)
+            pairs = int((c * (c - 1)).sum())  # == same.sum() in the monolithic path, sans the sync
+            if pairs == 0:
+                continue
+            gid_t = torch.from_numpy(gid).to(dev)
+            s_ = checkpoint(_psep_slice, z[start:end], gid_t, m_sep, use_reentrant=False)
+            hinge_sum = s_ if hinge_sum is None else hinge_sum + s_
+            cnt += pairs
+        out["psep"] = hinge_sum / cnt if cnt else None
+    else:
+        hinge_sum = z.new_zeros(())
+        cnt = 0
+        for start, end, gid in B.slices:
+            zs = z[start:end]
+            gid_t = torch.from_numpy(gid).to(dev)
+            same = gid_t[:, None] == gid_t[None, :]
+            same.fill_diagonal_(False)
+            if not same.any():
+                continue
+            d = _safe_dist(zs, zs)
+            h = torch.clamp(m_sep - d, min=0.0)
+            hinge_sum = hinge_sum + (h[same] ** 2).sum()
+            cnt += int(same.sum().item())
+        out["psep"] = hinge_sum / cnt if cnt else None
 
     return out, sc_per_ticker, tc_per_ticker
 
