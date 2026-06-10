@@ -276,7 +276,8 @@ def _cross_market_eval(model, ds, cfg, per_win_us, us_eval, us_strat, strat_us_v
             n_strat += len(m_strat)
         ru = _score_retrieval(uq, uhk, utk)
         for k in ("consistency_train_stratified", "consistency_holdout_stratified",
-                  "consistency_ratio_stratified", "retrieval_acc_stratified", "margin_ratio_stratified"):
+                  "consistency_ratio_stratified", "retrieval_acc_stratified",
+                  "retrieval_tested_stratified", "margin_ratio_stratified"):
             if k in strat_us_vals:
                 out[k + "_us"] = strat_us_vals[k]
         out["consistency_train_stratified"] = float(np.median(tc_all)) if tc_all else float("nan")
@@ -285,6 +286,7 @@ def _cross_market_eval(model, ds, cfg, per_win_us, us_eval, us_strat, strat_us_v
             float(np.median(hc_all) / np.median(tc_all)) if tc_all and hc_all else float("nan")
         )
         out["retrieval_acc_stratified"] = ru["acc"]
+        out["retrieval_tested_stratified"] = ru["tested"]
         out["margin_ratio_stratified"] = ru["margin_ratio"]
         out["strat_windows"] = n_strat
 
@@ -348,6 +350,7 @@ def run_eval(model: IdentityEncoder, ds: StockData, cfg: Config, replicas: list 
             "consistency_holdout_stratified": float(np.median(hc)) if hc else float("nan"),
             "consistency_ratio_stratified": float(np.median(hc) / np.median(tc)) if tc and hc else float("nan"),
             "retrieval_acc_stratified": ret_s["acc"],
+            "retrieval_tested_stratified": ret_s["tested"],
             "margin_ratio_stratified": ret_s["margin_ratio"],
             "strat_windows": len(strat_windows),
         }

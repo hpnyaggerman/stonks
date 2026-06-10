@@ -127,11 +127,49 @@ class Config:
     exchange_market_map: dict[str, str] = field(   # exchange -> market (cross_market only)
         default_factory=lambda: dict(DEFAULT_EXCHANGE_MARKET_MAP)
     )
-    min_calendar_quorum: int = 5 # cross_market union grids only: a date enters a market's grid
-                                 # only if >= this many of its tickers have a bar — a lone rogue
-                                 # date in one file would otherwise hole every ticker's
-                                 # completeness in the windows spanning it (no benchmark CSV
-                                 # exists for non-US markets, so their grids come from unions)
+    min_calendar_quorum: int = 5 # quorum-union grids (cross_market secondaries): absolute floor —
+                                 # a date is a grid candidate only if >= this many tickers have a
+                                 # raw bar (calendar_validity="rows") or a valid TRADED bar
+                                 # ("traded"). With calendar_frac > 0 the fractional leg is the
+                                 # operative guard; any floor in [5, ~400] is equivalent there
+    calendar_validity: str = "rows"  # quorum-union grids only. "rows" = historical: candidate
+                                 # dates counted by RAW rows — this admits vendor placeholder
+                                 # days (e.g. CN holiday bars carrying V=0 forward-fills), each
+                                 # of which zeroes window completeness for every ticker.
+                                 # "traded" = count only valid traded bars (finite, prices > 0,
+                                 # V > 0): the feed's own encoding of "market open"
+    calendar_frac: float = 0.0   # second quorum leg: keep a candidate date only if its count
+                                 # >= this fraction of the centered rolling max over
+                                 # calendar_frac_window candidates. Era-robust closure/partial
+                                 # detector (drops holiday placeholder days, vendor partial
+                                 # deliveries, market-wide V=0 glitch days). 0.0 = off
+                                 # (historical). Recommended 0.5 with calendar_validity="traded"
+    calendar_frac_window: int = 121  # rolling-max window for calendar_frac, in candidate dates
+    halt_markets: tuple[str, ...] = ()  # markets ingested halt-tolerantly. The feed encodes
+                                 # closures/halts as carried bars (V=0, prices = last close;
+                                 # measured 99.65-99.98% bit-exact forward fills) before 2024
+                                 # and as MISSING ROWS after: with a market listed here, carried
+                                 # bars are admitted as halted days and missing rows strictly
+                                 # inside a ticker's listing span are synthesized to the same
+                                 # convention within max_ffill_days of its last traded bar.
+                                 # A window is complete when every day is admitted (traded or
+                                 # halted-carried) and >= halt_minfrac of days traded. () =
+                                 # strict trading everywhere (historical)
+    halt_minfrac: float = 0.9    # minimum traded fraction per complete window in halt markets
+                                 # (ceil(0.9*64) = 58 traded days): admits the dominant 1-6 day
+                                 # holiday/compliance halts, keeps genuinely suspended cells out
+    max_ffill_days: int = 14     # gap-synthesis cap in CALENDAR days from the ticker's last
+                                 # TRADED bar — the anchor is synthesis-invariant, making the
+                                 # fill idempotent across cache reloads; long holes (B-share
+                                 # coverage gap, delisting reviews) stay excluded rather than
+                                 # blessed with stale carried prices
+    holdout_pool_windows: int | None = None  # None = holdout pool requires completeness in EVERY
+                                 # window (historical rule, all markets). int K (>= 2) =
+                                 # SECONDARY markets draw their holdout from tickers complete in
+                                 # the newest min(K, F) windows — the block the acceptance
+                                 # metrics actually read; the PRIMARY market always keeps the
+                                 # all-windows rule, so the US draw at rng(holdout_seed) stays
+                                 # seed-identical in every mode. Recommended K = eval_windows
 
     # --- model ---
     D: int = 32                  # embedding dimension

@@ -539,9 +539,35 @@ def main():
         "co-reside in the training step, with attention groups staying single-market",
     )
     ap.add_argument(
+        "--calendar-validity", default=None, choices=["rows", "traded"],
+        help='quorum-grid candidate counting: "rows" (historical: raw rows, admits vendor placeholder '
+        'days) or "traded" (valid traded bars only — the feed\'s own encoding of "market open")',
+    )
+    ap.add_argument(
+        "--calendar-frac", type=float, default=None,
+        help="drop candidate grid dates below this fraction of the rolling-max market size "
+        "(closure/partial-delivery guard; 0 = off, recommended 0.5 with --calendar-validity traded)",
+    )
+    ap.add_argument("--calendar-frac-window", type=int, default=None,
+                    help="rolling-max window for --calendar-frac, in candidate dates (default 121)")
+    ap.add_argument(
+        "--halt-markets", default=None,
+        help='comma-separated markets ingested halt-tolerantly (e.g. "CN"): carried bars admitted as '
+        'halted days, missing-row halts synthesized within --max-ffill-days of the last traded bar; "" disables',
+    )
+    ap.add_argument("--halt-minfrac", type=float, default=None,
+                    help="minimum traded fraction per complete window in halt markets (default 0.9)")
+    ap.add_argument("--max-ffill-days", type=int, default=None,
+                    help="gap-synthesis cap in calendar days from the last traded bar (default 14)")
+    ap.add_argument(
+        "--holdout-pool-windows", type=int, default=None,
+        help="secondary markets draw their holdout from tickers complete in the newest K windows "
+        "(>= 2; the primary market always keeps the all-windows rule; default: all windows)",
+    )
+    ap.add_argument(
         "--context-checkpoint", action="store_true",
         help="recompute each (window, scale) context pass during backward (exact: identical "
-        "gradients and draws; cuts step activation memory ~15x at parquet scale for ~+30% time)",
+        "gradients and draws; cuts step activation memory ~15x at parquet scale for ~+30%% time)",
     )
     ap.add_argument(
         "--loss-chunk", type=int, default=None,
@@ -572,10 +598,13 @@ def main():
         cfg.run_dir = args.run_dir
     for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric",
               "strat_eval_windows", "data_format", "parquet_dir", "min_history_days",
-              "loss_chunk", "devices"):
+              "loss_chunk", "devices", "calendar_validity", "calendar_frac",
+              "calendar_frac_window", "halt_minfrac", "max_ffill_days", "holdout_pool_windows"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)
+    if args.halt_markets is not None:
+        cfg.halt_markets = tuple(s.strip() for s in args.halt_markets.split(",") if s.strip())
     if args.context_checkpoint:
         cfg.context_checkpoint = True
     if args.eval_parallel:

@@ -202,6 +202,58 @@ single-market pipeline, verified by hash):
 - Memory: both markets' panels and features stay resident (full US+CN ≈ a few
   GB); per-step compute roughly doubles (both markets encoded per step).
 
+**Secondary-market data semantics** (measured on the shipped CN slice): the feed
+encodes market closures and stock halts as *carried bars* — rows with
+O=H=L=C = last traded close and V=0, 99.65–99.98% bit-exact forward fills —
+through 2023, and as *missing rows* from 2024. Read naively ("a row must be a
+traded bar"), every holiday placeholder day poisons the window containing it
+(68 of 78 CN windows had zero complete tickers). Three run-permanent ingestion
+knobs, all default-off (defaults are byte-identical to the historical reader),
+interpret the encoding instead:
+
+- `calendar_validity="traded"` + `calendar_frac=0.5` (+ `calendar_frac_window=121`):
+  a quorum-grid date is a market-open day only if enough tickers actually
+  *traded* (absolute floor `min_calendar_quorum` AND ≥ frac of the rolling-max
+  market size) — drops holiday placeholder days, market-wide V=0 glitch days,
+  and severe vendor partial deliveries, across both encoding eras. CN: 4,701
+  grid days, 73/73 windows usable.
+- `halt_markets=("CN",)` + `halt_minfrac=0.9` + `max_ffill_days=14`: carried
+  bars are admitted as halted days, and missing rows inside a ticker's listing
+  span are synthesized to the same convention within 14 calendar days of its
+  last traded bar (long holes — the B-share coverage gap, delisting reviews —
+  stay excluded). A window is complete when every day is admitted and ≥ 58 of
+  64 days traded. Halted days carry exact-zero price returns and the volume
+  sentinel 0.0 (volume median over traded days only; clip quantiles estimated
+  on traded-day returns only). Suspension-prone tickers stay in the population
+  instead of being censored — halt propensity becomes learnable identity
+  signal. `normalize_window(halt_aware=True)` mirrors the identical rule at
+  inference; old artifacts default to the historical path byte-for-byte.
+- `holdout_pool_windows=32`: secondary markets draw their holdout from tickers
+  complete in the newest 32 windows (no CN ticker spans 19 unbroken years; the
+  newest block is what the acceptance metrics read) — CN holdout ≈ 112 under
+  the full config. The primary market always keeps the all-windows rule, so
+  the US draw stays seed-identical in every mode.
+
+Recommended staging (one variable per run, same `train_seed`):
+
+```bash
+# r12 — calendar repair + holdout pool (strict trading): the CN eval baseline
+python -m StockIdentityModel.train --run-dir StockIdentityModel/runs/r12 \
+    --data-format parquet --cross-market \
+    --calendar-validity traded --calendar-frac 0.5 --holdout-pool-windows 32 \
+    --context-checkpoint --loss-chunk 1024 --devices cuda:0,cuda:1 --eval-parallel
+
+# r13 — halt tolerance on top (the one-variable comparison against r12)
+python -m StockIdentityModel.train --run-dir StockIdentityModel/runs/r13 \
+    --data-format parquet --cross-market \
+    --calendar-validity traded --calendar-frac 0.5 --holdout-pool-windows 32 \
+    --halt-markets CN \
+    --context-checkpoint --loss-chunk 1024 --devices cuda:0,cuda:1 --eval-parallel
+```
+
+All seven ingestion fields are run-permanent (resume refuses drift) and bump
+the data cache to v5.
+
 ## Design notes
 
 - **Collapse guards** (post-r1, which collapsed totally — every ticker at one point, retrieval

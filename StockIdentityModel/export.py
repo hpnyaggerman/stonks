@@ -31,12 +31,23 @@ def export_artifact(checkpoint: str | Path, out_dir: str | Path, device: str | N
     model.eval()
 
     ds = StockData(cfg)  # deterministic rebuild: same holdout, same clip thresholds
+    meta = ds.summary()
+    ck_meta = ck.get("data_meta")
+    if ck_meta:
+        # data identity: the rebuilt dataset must match the checkpoint's snapshot,
+        # else the recipe/table would not reflect what the weights were trained on
+        bad = sorted(k for k in set(ck_meta) | set(meta) if ck_meta.get(k) != meta.get(k))
+        if bad:
+            detail = "\n".join(f"  {k}: checkpoint={ck_meta.get(k)!r} rebuild={meta.get(k)!r}" for k in bad)
+            raise ValueError(
+                "refusing to export: the dataset no longer matches the checkpoint's data_meta "
+                "(raw data changed since training):\n" + detail
+            )
     out = REPO_ROOT / out_dir if not Path(out_dir).is_absolute() else Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     # 1. weights + configuration (saved on CPU: the artifact is machine-portable)
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, out / "weights.pt")
-    meta = ds.summary()
     config_doc = {
         "config": ck["config"],
         "trained_steps": ck["step"],
@@ -45,6 +56,18 @@ def export_artifact(checkpoint: str | Path, out_dir: str | Path, device: str | N
             "clip_lo": ds.clip_lo,
             "clip_hi": ds.clip_hi,
             "calendar": cfg.calendar,
+            # halt-tolerant markets: carried/halted days carry zero price returns and
+            # volume sentinel 0.0, with the volume median over traded days only; the
+            # Embedder reads the operative values from `config`, this block documents
+            **(
+                {
+                    "halt_markets": sorted(cfg.halt_markets),
+                    "halt_minfrac": cfg.halt_minfrac,
+                    "max_ffill_days": cfg.max_ffill_days,
+                }
+                if cfg.halt_markets
+                else {}
+            ),
         },
         "universe": [ds.tickers[i] for i in ds.train_idx],
         "holdout": meta["holdout"],

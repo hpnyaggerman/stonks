@@ -54,6 +54,10 @@ class Embedder:
             min_date = min(w["dates"][0] for wins in self._mkts.values() for w in wins)
             self._frames = load_parquet_frames(self.cfg.parquet_dir, needed, min_date)
 
+        # halt-tolerant markets mirror the training ingestion at inference; old
+        # artifacts lack the config field -> () -> the historical code path
+        self._halt_markets = tuple(self.cfg.halt_markets or ())
+
         # context summary vectors per (market, recipe window), computed once
         self._ctx: dict[str, list[torch.Tensor]] = {}
         self._ticker_market: dict[str, str] = {}
@@ -64,7 +68,7 @@ class Embedder:
                     feats = []
                     for t in win["context_tickers"]:
                         self._ticker_market.setdefault(t, name)
-                        f = normalize_window(self._frame(t), win["dates"], self.clip_lo, self.clip_hi)
+                        f = self._normalize(self._frame(t), win["dates"], name)
                         if f is None:
                             raise RuntimeError(
                                 f"context ticker {t} incomplete in window {win['start']}..{win['end']}: "
@@ -74,6 +78,14 @@ class Embedder:
                     x = torch.from_numpy(np.stack(feats)).to(self.dev)
                     Hs.append(self.model.temporal(x))
                 self._ctx[name] = Hs
+
+    def _normalize(self, df: pd.DataFrame, dates: list[str], market: str) -> np.ndarray | None:
+        return normalize_window(
+            df, dates, self.clip_lo, self.clip_hi,
+            halt_aware=market in self._halt_markets,
+            halt_minfrac=self.cfg.halt_minfrac,
+            max_ffill_days=self.cfg.max_ffill_days,
+        )
 
     def _frame(self, ticker: str) -> pd.DataFrame:
         if self._frames is not None:
@@ -110,7 +122,7 @@ class Embedder:
                 k = win["context_tickers"].index(ticker)
                 zs.append(self.model.embed_rows(H_ctx)[k].cpu().numpy())
                 continue
-            f = normalize_window(df, win["dates"], self.clip_lo, self.clip_hi)
+            f = self._normalize(df, win["dates"], name)
             if f is None:
                 continue  # target incomplete in this window
             H_t = self.model.temporal(torch.from_numpy(f[None]).to(self.dev))
