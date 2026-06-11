@@ -751,6 +751,20 @@ def main():
         action="store_true",
         help="keep temporal-encoder activations in memory (faster; fine on a GPU with headroom)",
     )
+    # --- REL-3 relational context (architecture fields: run-permanent, fresh run required) ---
+    ap.add_argument("--L-ctx", dest="L_ctx", type=int, default=None,
+                    help="context-module depth (default 2; REL-3 runs use 3)")
+    ap.add_argument("--n-heads-ctx", type=int, default=None,
+                    help="context-only head count (default: n_heads; REL-3 runs use 8; zero params)")
+    ap.add_argument("--attn-temp-ctx", action="store_true",
+                    help="per-block per-head learned log-temperature on context attention (REL-3; zero-init = x1)")
+    ap.add_argument("--edge-stats", default=None,
+                    help='comma-separated relational bias planes, e.g. "corr0,dlogvol" (the REL-3 run '
+                    'set; "beta_prod" supported but opt-in — see config.py); "" disables the edge module')
+    ap.add_argument("--psn-rank", type=int, default=None,
+                    help="PairScore non-bilinear pair-scorer ridge width (default 0 = off; REL-3 runs use 16)")
+    ap.add_argument("--edge-chunk", type=int, default=None,
+                    help="row-chunk for the checkpointed bias MLPs (operational knob, value-exact; default 512)")
     args = ap.parse_args()
 
     cfg = Config.load(args.config) if args.config else Config()
@@ -759,12 +773,17 @@ def main():
     for k in ("max_steps", "eval_every", "warmup_steps", "device", "best_metric",
               "strat_eval_windows", "data_format", "parquet_dir", "min_history_days",
               "loss_chunk", "devices", "calendar_validity", "calendar_frac",
-              "calendar_frac_window", "halt_minfrac", "max_ffill_days", "holdout_pool_windows"):
+              "calendar_frac_window", "halt_minfrac", "max_ffill_days", "holdout_pool_windows",
+              "L_ctx", "n_heads_ctx", "psn_rank", "edge_chunk"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)
     if args.halt_markets is not None:
         cfg.halt_markets = tuple(s.strip() for s in args.halt_markets.split(",") if s.strip())
+    if args.edge_stats is not None:
+        cfg.edge_stats = tuple(s.strip() for s in args.edge_stats.split(",") if s.strip())
+    if args.attn_temp_ctx:
+        cfg.attn_temp_ctx = True
     if args.context_checkpoint:
         cfg.context_checkpoint = True
     if args.eval_parallel:

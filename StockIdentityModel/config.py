@@ -47,8 +47,36 @@ concentration (-> window_offset, lambda_util 1->3); r6->r7 kappa_floor
 newest margin ~1.5); r8 v0 1.0->0.4 dimensional collapse (reverted); r9
 clip_norm 1->25 premature stall (reverted); r10 seam-capacity ResidualMLPs
 (+528k params) memorization slide, epiphenomenal at inference (reverted;
-code in commit d34dcc4 -> doctrine point 5). This file's defaults = r7's
-recipe.
+code in commit d34dcc4 -> doctrine point 5); r11 US-parquet scale-up
+(347 -> 6,676 tickers, r7 recipe unchanged; ~32.0 h of step time on
+2x4090 -- 5.77 s/step mean at 8 windows/step, 7.3 GB peak, evals on
+top): run healthy end to end -- no collapse (final spectrum 32/32 dims
+in [0.47, 1.13]), no memorization scissor (consistency holdout/train
+0.94 newest / 1.02 stratified, flat), population geometry flat (zbar
+mean ~3.54 all late run) under a contraction-leaning force balance
+(contraction 1.2-1.9x expansion throughout; fences + always-on clip
+held it) -- but the r7 equilibrium does not transfer: stratified margin
+peaks 0.892 @ 10.5k (lr still half peak) then oscillates at
+0.851 +/- 0.021 to 20k with zero trend; newest-block margin ~0.68;
+retrieval 0.25 final / 0.27 max (12 of 44) against the 5,771-key
+gallery (18x r7's distractors, so 1.41 -> 0.89 overstates the quality
+loss -- but margin < 1 means the median holdout ticker no longer finds
+itself). Meanwhile the separation hinges are active on 100% of late
+steps (xsep_full ~0.51, psep_full ~0.45 against ceiling m_sep^2 = 8 --
+slack at 347), syn carries the largest single per-term force despite
+lambda_syn = 0.3, I_self/I_peer sit at 3.4x/3.1x I_full,
+partition_agreement is flat at ~0.23, and grad_norm still runs 4-6x the
+clip: 9,500 post-plateau steps of sustained, well-conditioned gradient
+bought zero holdout improvement. Verdict: function-class ceiling -- not
+loss-demand ceiling (hinges never slack), not r10 (same best step
+10.5k, opposite tail: r10 bled, r11 sat). Known floor: zbar_min
+0.08-0.15 -- near-duplicate listings no function separates; hinge raws
+are not expected to reach zero under any architecture. Retrieval still
+creeping at the horizon = near-misses flipping across rho = 1 with the
+distribution pinned, not quality growth. This run is the measured
+demand precondition behind the REL-3 context upgrade
+(DESIGN_CONTEXT_V2.md) and its comparison baseline. This file's
+defaults = r7's recipe.
 """
 from __future__ import annotations
 

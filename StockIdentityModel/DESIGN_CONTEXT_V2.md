@@ -137,7 +137,7 @@ New-mechanism params: **4,468**, all logit-level ⇒ 100% relational-route. The 
 
 ## 8. Run command + new log scalars
 
-Write `StockIdentityModel/runs/v2rel3/config.json` = the r7 recipe + current data settings (parquet, cross_market, halt_markets, calendar flags as the active run) + `{"L_ctx": 3, "n_heads_ctx": 8, "attn_temp_ctx": true, "edge_stats": ["corr0","dlogvol"], "psn_rank": 16}` (architecture fields are config-file-only; the CLI exposes no `--set`). Then:
+The REL-3 fields are settable from the CLI (`--L-ctx`, `--n-heads-ctx`, `--attn-temp-ctx`, `--edge-stats`, `--psn-rank`, plus the `--edge-chunk` knob) on top of any `--config`; config defaults stay at the legacy values deliberately — legacy resume comparisons and old artifacts read absent fields as defaults, so flipping the defaults would misclassify every pre-REL-3 checkpoint/artifact. Launch:
 
 ```
 ~/venvs/stockid/bin/python -m StockIdentityModel.train \
@@ -159,3 +159,35 @@ New log scalars (all no_grad, outside the segment, at `grad_diag_every`=250 cade
 3. `beta_prod` (only if opted back in — off the default run set): exact-path observer→peer-row weight channel (measured 4.5e-2 plane shift) + train/eval grouping shift (9-stock factor at fine scales vs market factor at eval scale 1) → channel engaged (`edge_share` up) but holdout margins flat or peer-route train/holdout scissoring; settle with per-channel ablation (zero its edge[0] input column) and the r_o-perturbation probe.
 4. Zero-init engagement stall → both share scalars ≈0 at step 2k → σ=1e-3 re-init of the zero output layers.
 5. Bias dominance / cap saturation → `edge_sat_frac` → 1 or `psn_share` ≫ 1; the tanh cap deductively bounds |bias| < 4, so the failure shape is a plateau, not divergence — retune `edge_cap` on the next run, never mid-run.
+## 10. Measured baseline — r11 (the run REL-3 must beat)
+
+r11 = the pre-REL-3 architecture (L_ctx=2, 4 heads, no relational bias) on US-only parquet:
+6,676 tickers (min_history=252), r7 recipe, train_seed=0, 20k steps, `cuda:0,cuda:1`,
+`--context-checkpoint --loss-chunk 1024 --eval-parallel`. Full logs in `runs/r11/`.
+
+**Outcome (autopsy verified from the logs):** stratified margin best **0.892 @ 10.5k** (lr
+still half peak), then **0.851 ± 0.021 plateau to 20k, zero trend**; newest-block margin
+~0.68; retrieval 0.25 final / 0.27 max (12/44) vs the 5,771-key gallery;
+`partition_agreement` flat at ~0.23. Health clean: no collapse (32/32 dims in
+[0.47, 1.13]), no train/holdout scissor (consistency ratio 0.94 newest / 1.02 stratified,
+flat), population geometry flat under a contraction-leaning force balance (1.2–1.9×,
+held by the fences + always-on clip). Demand persisted the whole plateau: hinges active
+on 100% of late steps (`xsep_full` ~0.51, `psep_full` ~0.45 of the m_sep² = 8 ceiling),
+`force.syn` the largest single term at λ_syn = 0.3, I_self/I_peer ≈ 3.4×/3.1× I_full,
+grad_norm 4–6× the clip. 9,500 post-plateau steps of sustained gradient bought zero
+holdout improvement ⇒ **function-class ceiling, measured** — the demand premise of this
+spec, confirmed after the fact.
+
+**Cost anchor (measured):** 5.77 s/step mean at 8 US windows/step ⇒ **32.0 h of step time
+per 20k steps** (evals/checkpoints on top), 7.3 GB peak/card. REL-3 ×1.4–1.5 projection:
+~8.1–8.7 s/step ≈ **45–48 h per 20k-step run** on the efficient-backend branch (math
+branch ×~1.8 ≈ 58 h), projected peak ~13–15 GB — fits with the §6 fallback ladder intact.
+
+**One-variable comparison protocol:** copy `runs/r11/config.json` + the §8 REL-3 fields,
+same `train_seed=0`, same `--devices cuda:0,cuda:1`. **Accept** = stratified margin
+separating upward from the 0.85 band past 10.5k, with the certified demand actually
+consumed at matched steps (hinge raws and `force.syn` below r11's) and
+`partition_agreement` falling (the data-conditioned bias attacks grouping noise
+directly), no consistency-ratio scissor. **Floor caveat:** r11's z̄ closest pairs sit at
+0.08–0.15 (near-duplicate listings) — hinge raws are not expected to reach zero under
+any architecture; judge on the margin distribution moving, not on hinge extinction.
