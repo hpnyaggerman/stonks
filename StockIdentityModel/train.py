@@ -14,13 +14,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .config import KNOB_FIELDS, Config, REPO_ROOT
 from .data import StockData, ladder
 from .evaluate import run_eval
 from .losses import AnchorState, EmaNormalizer, StepIndex, StepStore, combine, grad_force_diag, step_losses
-from .model import IdentityEncoder
+from .model import IdentityEncoder, compute_edge_planes, rv_from_feats
 from .sampling import StratumSampler, draw_partitions
 
 
@@ -87,8 +88,10 @@ def calibrate_output_scale(model: IdentityEncoder, ds: StockData, cfg: Config) -
     acc: dict[int, list[torch.Tensor]] = {}
     for mkt, w in jobs:
         uni = mkt.train_universe(w)
-        H = model.temporal(torch.from_numpy(mkt.feats_at(uni, w)).to(dev))
-        Z = model.embed_rows(H)
+        x = torch.from_numpy(mkt.feats_at(uni, w)).to(dev)
+        H = model.temporal(x)
+        rv = rv_from_feats(x) if model.context.relational else None
+        Z = model.embed_rows(H, rv=rv)
         for k, t in enumerate(uni):
             acc.setdefault(int(t), []).append(Z[k])
     zbar = torch.stack([torch.stack(v).mean(0) for v in acc.values()])
@@ -103,6 +106,123 @@ def calibrate_output_scale(model: IdentityEncoder, ds: StockData, cfg: Config) -
         "var_before": {"min": float(v.min()), "med": float(np.median(v)), "max": float(v.max())},
         "scale_applied": {"min": float(sc.min()), "med": float(np.median(sc)), "max": float(sc.max())},
     }
+
+
+def _probe_sdpa_backend(dev: torch.device, L: int, heads: int, hd: int) -> dict:
+    """One-time startup probe: which SDPA backends accept the context stack's
+    grad-bearing float-mask call (aligned padded-slice mask, exactly what
+    build_bias produces) at the largest group size L and at L+1. Efficient vs
+    math decides ~GBs of saved softmax per scale-1 call — risk register #1;
+    the result is printed and written to train_log as the step-0 record."""
+    if dev.type != "cuda":
+        return {"device": dev.type}
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+    except ImportError:
+        return {"device": "cuda", "probe": "unavailable (torch.nn.attention missing)"}
+    out: dict = {"device": "cuda"}
+    for Lp in (L, L + 1):
+        Lpad = -(-Lp // 8) * 8
+        q = torch.randn(1, heads, Lp, hd, device=dev)
+        k = torch.randn(1, heads, Lp, hd, device=dev)
+        v = torch.randn(1, heads, Lp, hd, device=dev)
+        backing = torch.zeros(1, 1, Lp, Lpad, device=dev, requires_grad=True)
+        m = backing[..., :Lp]
+        res = {}
+        for name, be in (
+            ("flash", SDPBackend.FLASH_ATTENTION),
+            ("efficient", SDPBackend.EFFICIENT_ATTENTION),
+            ("math", SDPBackend.MATH),
+        ):
+            try:
+                with sdpa_kernel([be]):
+                    F.scaled_dot_product_attention(q, k, v, attn_mask=m).sum().backward()
+                res[name] = True
+            except RuntimeError:
+                res[name] = False
+            backing.grad = None
+        out[f"L={Lp}"] = res
+        del q, k, v, backing, m
+    return out
+
+
+@torch.no_grad()
+def relational_diag(model: IdentityEncoder, ds: StockData, cfg: Config, a: int) -> dict:
+    """REL-3 engagement meters on the first US job's scale-1 group (whole
+    universe at span start `a`), through the deterministic eval path:
+
+      edge_bias_abs — mean |capped bias| over pairs (read against the holdout
+                      margin curves: the r10 detector);
+      edge_sat_frac — fraction of pairs with |bias| > 0.9 * edge_cap;
+      psn_share / edge_share — RMS of each raw channel vs the RMS of block-0's
+                      post-temperature bilinear logits (channel attribution).
+
+    no_grad, outside the checkpointed segments, at grad_diag_every cadence."""
+    was_training = model.training
+    model.eval()
+    try:
+        dev = next(model.parameters()).device
+        ctx = model.context
+        cap = cfg.edge_cap
+        uni = ds.us.universe_at(a)
+        x = torch.from_numpy(ds.us.window_feats_at(uni, a)).to(dev)
+        H = model.temporal(x)
+        Hg = H[None]
+        R, V = rv_from_feats(x)
+        L = Hg.shape[1]
+        planes = None
+        if ctx.edge is not None:
+            planes = compute_edge_planes(R[None], V[None], ctx._stats, cfg.edge_shrink_n0, cfg.edge_min_overlap)
+        ab = ctx.psn.qk(Hg) if ctx.psn is not None else None
+        chunk = max(1, cfg.edge_chunk)
+        s_abs = s_sat = s_e2 = s_p2 = 0.0
+        n_pairs = 0
+        for c0 in range(0, L, chunk):
+            c1 = min(c0 + chunk, L)
+            e = ctx.edge(planes[:, c0:c1]) if planes is not None else None
+            p = (
+                ctx.psn.W2(F.gelu(ab[0][:, c0:c1, None, :] + ab[1][:, None, :, :]))
+                if ab is not None
+                else None
+            )
+            raw = (e if e is not None else 0) + (p if p is not None else 0)
+            bias = cap * torch.tanh(raw / cap)
+            s_abs += float(bias.abs().sum())
+            s_sat += float((bias.abs() > 0.9 * cap).sum())
+            if e is not None:
+                s_e2 += float((e ** 2).sum())
+            if p is not None:
+                s_p2 += float((p ** 2).sum())
+            n_pairs += bias.numel()
+        # block-0 post-temperature bilinear logits (the denominator channel)
+        blk = ctx.blocks[0]
+        att = blk.attn
+        qn = blk.ln1(Hg)
+        q = att.wq(qn).view(1, L, att.h, att.hd).transpose(1, 2)
+        k = att.wk(qn).view(1, L, att.h, att.hd).transpose(1, 2)
+        if att.log_tau is not None:
+            q = q * torch.exp(att.log_tau)[None, :, None, None]
+        scale = att.hd ** -0.5
+        s_l2 = 0.0
+        n_l = 0
+        for c0 in range(0, L, chunk):
+            c1 = min(c0 + chunk, L)
+            lg = (q[:, :, c0:c1] @ k.transpose(-2, -1)) * scale
+            s_l2 += float((lg ** 2).sum())
+            n_l += lg.numel()
+        rms_logit = (s_l2 / max(n_l, 1)) ** 0.5
+        out = {
+            "L": int(L),
+            "edge_bias_abs": s_abs / max(n_pairs, 1),
+            "edge_sat_frac": s_sat / max(n_pairs, 1),
+        }
+        if ctx.edge is not None:
+            out["edge_share"] = (s_e2 / max(n_pairs, 1)) ** 0.5 / (rms_logit + 1e-12)
+        if ctx.psn is not None:
+            out["psn_share"] = (s_p2 / max(n_pairs, 1)) ** 0.5 / (rms_logit + 1e-12)
+        return out
+    finally:
+        model.train(was_training)
 
 
 def draw_observer_dropout(real: torch.Tensor, p_attn: float) -> torch.Tensor:
@@ -120,15 +240,30 @@ def draw_observer_dropout(real: torch.Tensor, p_attn: float) -> torch.Tensor:
     return keep
 
 
-def _context_views_segment(ctx, H, order_t, gid_t, pos_t, real, vis_peers, *ff_masks):
+def _scatter_rows(src, order_t, gid_t, pos_t, B, L):
+    """Rows -> padded groups: [U, ...] -> [B, L, ...] (zeros at pad slots)."""
+    out = src.new_zeros(B, L, *src.shape[1:])
+    out[gid_t, pos_t] = src[order_t]
+    return out
+
+
+def _context_views_segment(ctx, H, R, V, order_t, gid_t, pos_t, real, vis_peers, *ff_masks):
     """Checkpoint segment for one (window, scale): group scatter + three views +
-    row gather. Contains NO RNG — the dropout masks enter as tensor arguments —
-    so backward recompute is deterministic and gradient-exact. Only the [rows, D]
-    outputs (and the argument tensors) survive the step; do not add stochastic
-    ops in here."""
-    Hg = H.new_zeros(real.shape[0], real.shape[1], H.shape[1])
-    Hg[gid_t, pos_t] = H[order_t]
-    z_full, z_self, z_peer = ctx.views(Hg, vis_peers, real, list(ff_masks) or None)
+    row gather. Contains NO RNG — the dropout masks enter as tensor arguments,
+    and the relational bias (planes/PairScore/tanh) is a deterministic function
+    of (H, R, V) — so backward recompute is deterministic and gradient-exact.
+    Only the [rows, D] outputs (and the argument tensors — R/V are per-window
+    and shared across this window's segments) survive the step; do not add
+    stochastic ops in here."""
+    B, L = real.shape
+    Hg = _scatter_rows(H, order_t, gid_t, pos_t, B, L)
+    rv = None
+    if ctx.relational:
+        rv = (
+            _scatter_rows(R, order_t, gid_t, pos_t, B, L),
+            _scatter_rows(V, order_t, gid_t, pos_t, B, L),
+        )
+    z_full, z_self, z_peer = ctx.views(Hg, vis_peers, real, list(ff_masks) or None, rv=rv)
     return z_full[gid_t, pos_t], z_self[gid_t, pos_t], z_peer[gid_t, pos_t]
 
 
@@ -213,6 +348,7 @@ def run_step(replicas: list, devs: list, ds: StockData, draws: list[tuple[int, i
         mdl, dev = replicas[di], devs[di]
         x = torch.from_numpy(mkt.window_feats_at(uni, a)).to(dev)
         H = mdl.encode_window(x, grad_checkpoint=cfg.grad_checkpoint)
+        R, V = rv_from_feats(x)  # per-window; every scale's segment shares these tensors
         for n_s, groups in parts.items():
             lengths = np.array([len(g) for g in groups])
             g_max = int(lengths.max())
@@ -240,13 +376,19 @@ def run_step(replicas: list, devs: list, ds: StockData, draws: list[tuple[int, i
 
             if cfg.context_checkpoint and mdl.training:
                 zf, zs, zp = checkpoint(
-                    _context_views_segment, mdl.context, H, order_t, gid_t, pos_t,
+                    _context_views_segment, mdl.context, H, R, V, order_t, gid_t, pos_t,
                     real, vis_peers, *(ff_masks or ()), use_reentrant=False,
                 )
             else:
-                Hg = H.new_zeros(len(groups), g_max, H.shape[1])
-                Hg[gid_t, pos_t] = H[order_t]
-                z_full, z_self, z_peer = mdl.context.views(Hg, vis_peers, real, ff_masks)
+                B_g, L_g = real.shape
+                Hg = _scatter_rows(H, order_t, gid_t, pos_t, B_g, L_g)
+                rv = None
+                if mdl.context.relational:
+                    rv = (
+                        _scatter_rows(R, order_t, gid_t, pos_t, B_g, L_g),
+                        _scatter_rows(V, order_t, gid_t, pos_t, B_g, L_g),
+                    )
+                z_full, z_self, z_peer = mdl.context.views(Hg, vis_peers, real, ff_masks, rv=rv)
                 zf, zs, zp = z_full[gid_t, pos_t], z_self[gid_t, pos_t], z_peer[gid_t, pos_t]
             store.add(
                 tickers=uni[order],
@@ -399,8 +541,18 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         best_score = float(ck.get("best_score", -math.inf))  # legacy checkpoints: no score recorded
         print(f"[resume] from {resume} at step {start_step} (best_score={best_score:.6g})")
 
+    sdpa_probe = None
+    if model.context.relational:
+        Lmax = max(len(m.train_universe(w)) for m in ds.markets.values() for w in m.usable_windows)
+        hpg = cfg.resolved_n_heads_ctx() // cfg.edge_head_groups
+        sdpa_probe = _probe_sdpa_backend(dev, Lmax, hpg, cfg.d_model // cfg.resolved_n_heads_ctx())
+        print(f"[sdpa_ctx_backend] {json.dumps(sdpa_probe)}")
+
     log_f = open(run_dir / "train_log.jsonl", "a")
     eval_f = open(run_dir / "eval_log.jsonl", "a")
+    if sdpa_probe is not None:
+        log_f.write(json.dumps({"step": start_step, "sdpa_ctx_backend": sdpa_probe}) + "\n")
+        log_f.flush()
 
     cuda_devs = [d for d in devs if d.type == "cuda"]
 
@@ -470,6 +622,14 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         if force is not None:
             rec["force"] = force
             rec["denom"] = {k: float(v) for k, v in norm.last_denom.items()}
+            if model.context.relational:
+                # engagement meters on the first US draw's scale-1 group, at the
+                # same span run_step used (offset + below-Y fallback replicated)
+                w0 = draws[0][0]
+                a0 = ds.us.shifted_start(w0, sampler.offset)
+                if len(ds.us.universe_at(a0)) < cfg.Y:
+                    a0 = ds.us.base_start(w0)
+                rec["rel"] = relational_diag(model, ds, cfg, a0)
         if cuda_devs:
             rec["mem_gb"] = {str(d): round(torch.cuda.max_memory_allocated(d) / 1e9, 3) for d in cuda_devs}
         log_f.write(json.dumps(rec) + "\n")

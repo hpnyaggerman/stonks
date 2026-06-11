@@ -20,7 +20,7 @@ import torch
 
 from .config import Config
 from .data import StockData, ladder
-from .model import IdentityEncoder
+from .model import IdentityEncoder, rv_from_feats
 from .sampling import draw_partitions, split_strata
 
 
@@ -73,16 +73,23 @@ def window_embeddings(model: IdentityEncoder, ds: StockData, w: int, mkt=None) -
     mkt = mkt if mkt is not None else ds.us
     model.eval()
     dev = next(model.parameters()).device
+    rel = model.context.relational
     uni = mkt.train_universe(w)
-    H_uni = model.temporal(torch.from_numpy(mkt.feats_at(uni, w)).to(dev))
-    Z_train = model.embed_rows(H_uni).cpu().numpy()
+    x_uni = torch.from_numpy(mkt.feats_at(uni, w)).to(dev)
+    H_uni = model.temporal(x_uni)
+    rv_uni = rv_from_feats(x_uni) if rel else None
+    Z_train = model.embed_rows(H_uni, rv=rv_uni).cpu().numpy()
     hold = {}
     for h in mkt.holdout_tids:
         if not mkt.complete[mkt.row[h], w]:
             continue
-        H_h = model.temporal(torch.from_numpy(mkt.feats_at(np.array([h]), w)).to(dev))
-        H = torch.cat([H_h, H_uni], dim=0)  # target row 0, context after
-        hold[int(h)] = model.embed_rows(H)[0].cpu().numpy()
+        x_h = torch.from_numpy(mkt.feats_at(np.array([h]), w)).to(dev)
+        H = torch.cat([model.temporal(x_h), H_uni], dim=0)  # target row 0, context after
+        rv = None
+        if rel:
+            r_h, v_h = rv_from_feats(x_h)
+            rv = (torch.cat([r_h, rv_uni[0]], dim=0), torch.cat([v_h, rv_uni[1]], dim=0))
+        hold[int(h)] = model.embed_rows(H, rv=rv)[0].cpu().numpy()
     return uni, Z_train, hold
 
 
@@ -198,19 +205,23 @@ def _retrieval(per_win: dict[int, tuple], windows: list[int], eps: float = 1e-9)
 def _partition_agreement(model: IdentityEncoder, cfg: Config, mkt) -> float:
     """Re-drawn partitions at the finest scale, fixed (newest usable) window."""
     dev = next(model.parameters()).device
+    rel = model.context.relational
     w = mkt.usable_windows[-1]
     uni = mkt.train_universe(w)
     U = len(uni)
-    H = model.temporal(torch.from_numpy(mkt.feats_at(uni, w)).to(dev))
+    x = torch.from_numpy(mkt.feats_at(uni, w)).to(dev)
+    H = model.temporal(x)
+    R, V = rv_from_feats(x) if rel else (None, None)
     n_fine = ladder(U, cfg.Y)[-1]
     reps = []
     for r in range(cfg.eval_redraws):
         parts = draw_partitions(U, [n_fine], seed=(w, 10_000_019 + r))[n_fine]
         Z = np.zeros((U, cfg.D), dtype=np.float32)
         for grp in parts:
-            Hg = H[torch.from_numpy(grp).to(dev)]
+            idx = torch.from_numpy(grp).to(dev)
             real = torch.ones(1, len(grp), dtype=torch.bool, device=dev)
-            Z[grp] = model.context.full_view(Hg[None], real)[0].cpu().numpy()
+            rv = (R[idx][None], V[idx][None]) if rel else None
+            Z[grp] = model.context.full_view(H[idx][None], real, rv=rv)[0].cpu().numpy()
         reps.append(Z)
     reps = np.stack(reps)  # [R, U, D]
     within = np.sqrt(((reps[:, None] - reps[None, :]) ** 2).sum(-1))  # [R, R, U]

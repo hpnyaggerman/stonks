@@ -84,7 +84,7 @@ DEFAULT_EXCHANGE_MARKET_MAP = {
 KNOB_FIELDS = frozenset({
     "run_dir", "device", "num_threads", "grad_checkpoint", "grad_diag_every",
     "eval_every", "max_steps", "K_inf", "calibrate_init", "raw_dir", "parquet_dir",
-    "context_checkpoint", "loss_chunk", "devices", "eval_parallel",
+    "context_checkpoint", "loss_chunk", "devices", "eval_parallel", "edge_chunk",
 })
 
 
@@ -181,6 +181,30 @@ class Config:
     p_attn: float = 0.15         # observer dropout rate
     p_ff: float = 0.10           # feed-forward dropout rate
     g_exact: int = 64            # exact peer view up to this group size; beyond it, the shared-context approximation
+
+    # --- relational context (REL-3; defaults reproduce the legacy module byte-identically) ---
+    n_heads_ctx: int | None = None  # context-stack head count; None -> n_heads. Zero params either
+                                 # way (wq/wk/wv/wo are d_model x d_model regardless)
+    attn_temp_ctx: bool = False  # per-block per-head learned log-temperature on the context
+                                 # attention queries (zero-init = x1). Single-key softmax is
+                                 # scale-invariant, so the self view never sees it
+    edge_stats: tuple[str, ...] = ()  # day-level pairwise planes feeding the attention-logit bias;
+                                 # () = edge module not built. REL-3 run set: ("corr0", "dlogvol").
+                                 # "beta_prod" is supported but opt-in: its group-mean factor lets
+                                 # an observer's returns modulate PEER rows' attention weights on
+                                 # the exact peer path (measured: planes(i,j != o) move ~4.5e-2
+                                 # under an r_o perturbation; corr0/dlogvol are exactly invariant),
+                                 # it is the noisiest plane at fine scales (beta std ~0.10 at g=16)
+                                 # with a train(group-factor)/eval(market-factor) shift, and corr0
+                                 # already spans factor structure (corr ~ beta beta^T + residual)
+    edge_hidden: int = 8         # edge-MLP hidden width (inert while edge_stats is empty)
+    edge_head_groups: int = 2    # bias channels G; must divide resolved_n_heads_ctx()
+    edge_cap: float = 4.0        # bias = cap*tanh(raw/cap) — deductive softmax-saturation bound
+    edge_shrink_n0: float = 8.0  # corr0 shrinkage rho*n/(n+n0) toward 0 at low joint-valid counts
+    edge_min_overlap: int = 16   # joint-valid-day floor; below it pair stats are zeroed
+    psn_rank: int = 0            # PairScore ridge width r (non-bilinear pair scorer); 0 = not built
+    edge_chunk: int = 512        # row-chunk for the checkpointed bias MLPs; value-exact recompute
+                                 # plumbing (the loss_chunk precedent), hence a KNOB_FIELD
 
     # --- loss ---
     alpha_prox: float = 1.0      # proximity boost
@@ -302,6 +326,9 @@ class Config:
 
     def resolved_m_sep(self) -> float:
         return self.m_sep if self.m_sep is not None else math.sqrt(self.D * self.v0) / 2.0
+
+    def resolved_n_heads_ctx(self) -> int:
+        return self.n_heads_ctx if self.n_heads_ctx is not None else self.n_heads
 
     def resolved_min_history_days(self) -> int:
         if self.min_history_days is not None:

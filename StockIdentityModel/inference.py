@@ -18,7 +18,7 @@ import torch
 
 from .config import Config, REPO_ROOT
 from .data import _load_csv, load_parquet_frames, normalize_window
-from .model import IdentityEncoder
+from .model import IdentityEncoder, rv_from_feats
 
 
 class Embedder:
@@ -58,12 +58,17 @@ class Embedder:
         # artifacts lack the config field -> () -> the historical code path
         self._halt_markets = tuple(self.cfg.halt_markets or ())
 
-        # context summary vectors per (market, recipe window), computed once
+        # context summary vectors per (market, recipe window), computed once;
+        # relational artifacts also retain each window's (returns, validity)
+        # — the bias channel's day-level inputs (~MBs) — alongside H_ctx
+        self._relational = self.model.context.relational
         self._ctx: dict[str, list[torch.Tensor]] = {}
+        self._ctx_rv: dict[str, list[tuple | None]] = {}
         self._ticker_market: dict[str, str] = {}
         with torch.no_grad():
             for name, wins in self._mkts.items():
                 Hs = []
+                rvs = []
                 for win in wins:
                     feats = []
                     for t in win["context_tickers"]:
@@ -77,7 +82,9 @@ class Embedder:
                         feats.append(f)
                     x = torch.from_numpy(np.stack(feats)).to(self.dev)
                     Hs.append(self.model.temporal(x))
+                    rvs.append(rv_from_feats(x) if self._relational else None)
                 self._ctx[name] = Hs
+                self._ctx_rv[name] = rvs
 
     def _normalize(self, df: pd.DataFrame, dates: list[str], market: str) -> np.ndarray | None:
         return normalize_window(
@@ -117,17 +124,21 @@ class Embedder:
         if name not in self._mkts:
             raise ValueError(f"unknown market {name!r}; artifact carries {sorted(self._mkts)}")
         zs = []
-        for win, H_ctx in zip(self._mkts[name], self._ctx[name]):
+        for win, H_ctx, rv_ctx in zip(self._mkts[name], self._ctx[name], self._ctx_rv[name]):
             if ticker is not None and ticker in win["context_tickers"]:
                 k = win["context_tickers"].index(ticker)
-                zs.append(self.model.embed_rows(H_ctx)[k].cpu().numpy())
+                zs.append(self.model.embed_rows(H_ctx, rv=rv_ctx)[k].cpu().numpy())
                 continue
             f = self._normalize(df, win["dates"], name)
             if f is None:
                 continue  # target incomplete in this window
-            H_t = self.model.temporal(torch.from_numpy(f[None]).to(self.dev))
-            H = torch.cat([H_t, H_ctx], dim=0)  # target row 0
-            zs.append(self.model.embed_rows(H)[0].cpu().numpy())
+            x_t = torch.from_numpy(f[None]).to(self.dev)
+            H = torch.cat([self.model.temporal(x_t), H_ctx], dim=0)  # target row 0
+            rv = None
+            if self._relational:
+                r_t, v_t = rv_from_feats(x_t)
+                rv = (torch.cat([r_t, rv_ctx[0]], dim=0), torch.cat([v_t, rv_ctx[1]], dim=0))
+            zs.append(self.model.embed_rows(H, rv=rv)[0].cpu().numpy())
         if not zs:
             raise ValueError("target ticker has no complete window among the inference windows")
         return np.stack(zs).mean(0)
