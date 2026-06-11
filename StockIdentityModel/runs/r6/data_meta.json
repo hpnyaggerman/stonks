@@ -1,0 +1,25 @@
+{
+  "tickers": 347,
+  "grid_days": 6659,
+  "grid_first": "1999-11-01",
+  "grid_last": "2026-04-23",
+  "windows": 104,
+  "usable_windows": 104,
+  "pool_size": 43,
+  "holdout_size": 10,
+  "holdout": [
+    "AIN",
+    "AMD",
+    "AON",
+    "ARW",
+    "BPOP",
+    "BTI",
+    "PNW",
+    "POOL",
+    "PPL",
+    "PRA"
+  ],
+  "clip_lo": -0.2995970845222473,
+  "clip_hi": 0.34761399030685425,
+  "tau_prox": 10.4
+}
