@@ -420,13 +420,30 @@ class EmaNormalizer:
     EMA init = the term's first-step value (step 1 normalizes to exactly 1);
     the EMA updates after the normalized loss is computed, using the previous
     step's EMA.
+
+    Stationary-loss branch (norm_freeze_step = T > 0): steps <= T are the
+    historical path verbatim; from the first step > T the EMA stops folding
+    new raws, so the unchanged denominator formula max(EMA_T, kappa*first)+eps
+    becomes a per-run constant and `total` is a stationary lambda-weighted
+    objective from T+1 on (level = distance to the training equilibrium; a
+    train-side read only — it is blind to memorization by construction, see
+    the r10 backtest in DESIGN_LOSS_STATIONARY.md). At the recommended T=1000
+    the sc/tc freeze is measured gradient-identical to the historical
+    floor-pinned path (floor engagement at steps ~371-460, zero re-crossings
+    in r10/r11/r14); the one objective change is syn, whose late-run force
+    decays to ~0.5x historical by 20k. The freeze deletes the r1 mechanism
+    class outright post-T (constant denominators cannot self-amplify), and
+    the pre-T window keeps the historical kappa-floor guard verbatim.
     """
 
-    def __init__(self, beta: float, eps: float, kappa_floor: float = 0.0):
+    def __init__(self, beta: float, eps: float, kappa_floor: float = 0.0, freeze_step: int = 0):
         self.beta, self.eps, self.kappa_floor = beta, eps, kappa_floor
+        self.freeze_step = freeze_step
+        self.step = 0  # set by the train loop each step (1-based); 0 pre-loop
         self.ema: dict[str, float] = {}
         self.first: dict[str, float] = {}
         self.last_denom: dict[str, float] = {}  # diagnostics only; not checkpoint state
+        self._frozen_seed_warned: set[str] = set()
 
     def normalize(self, name: str, raw: torch.Tensor, fixed_scale: float | None = None) -> torch.Tensor:
         if fixed_scale is not None:
@@ -437,7 +454,18 @@ class EmaNormalizer:
         first = self.first.setdefault(name, r)
         denom = max(prev, self.kappa_floor * first) + self.eps
         self.last_denom[name] = denom
-        self.ema[name] = self.beta * prev + (1 - self.beta) * r if name in self.ema else r
+        frozen = self.freeze_step > 0 and self.step > self.freeze_step
+        if name not in self.ema:
+            # seeding always allowed: a term debuting post-freeze freezes at its
+            # first-seen value (behavioral fidelity with the historical first-sight
+            # init) — shouldn't happen (cross-market adds no term names), so warn
+            self.ema[name] = r
+            if frozen and name not in self._frozen_seed_warned:
+                self._frozen_seed_warned.add(name)
+                print(f"[norm] WARNING: term {name!r} first seen after freeze step "
+                      f"{self.freeze_step}; frozen at its first-seen value")
+        elif not frozen:
+            self.ema[name] = self.beta * self.ema[name] + (1 - self.beta) * r
         return raw / denom
 
     def state_dict(self) -> dict:

@@ -474,6 +474,11 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         raise ValueError(f"unknown best_metric {cfg.best_metric!r}")
     if cfg.loss_chunk < 0:
         raise ValueError(f"loss_chunk must be >= 0 (0 = monolithic), got {cfg.loss_chunk}")
+    if cfg.norm_freeze_step < 0:
+        raise ValueError(f"norm_freeze_step must be >= 0 (0 = historical EMA path), got {cfg.norm_freeze_step}")
+    if 0 < cfg.norm_freeze_step and cfg.norm_freeze_step >= cfg.max_steps:
+        print(f"[norm] WARNING: norm_freeze_step={cfg.norm_freeze_step} >= max_steps={cfg.max_steps} — "
+              "the freeze will not fire this session (max_steps is a knob; it may fire on a later resume)")
     ck = None
     if resume:
         ck = torch.load(Path(resume), weights_only=False, map_location="cpu")  # portable across machines
@@ -528,7 +533,7 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         print(f"[calibrate] {json.dumps(calib)}")
     opt = build_optimizer(model, cfg)
     anchors = AnchorState(ds.T, cfg.D, cfg, device=dev)
-    norm = EmaNormalizer(cfg.beta, cfg.eps, cfg.kappa_floor)
+    norm = EmaNormalizer(cfg.beta, cfg.eps, cfg.kappa_floor, freeze_step=cfg.norm_freeze_step)
     sampler = StratumSampler(
         ds.usable_windows, cfg.M, cfg.W, np.random.default_rng(cfg.train_seed),
         offset_range=cfg.N if cfg.window_offset else 0,
@@ -555,6 +560,7 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         log_f.flush()
 
     cuda_devs = [d for d in devs if d.type == "cuda"]
+    syn_hot_prev = False  # post-freeze syn anomaly needs two consecutive hot diag steps
 
     for step in range(start_step + 1, cfg.max_steps + 1):
         t0 = time.time()
@@ -570,9 +576,27 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         batch = store.finalize(device=dev)
         idx = StepIndex(batch, cfg, ds.tau_prox)
         terms, I, I_per_ticker, present, zbar, spectrum = step_losses(cfg, batch, idx, ds.T, anchors)
+        norm.step = step  # the freeze gate compares this against norm_freeze_step
         total, normalized = combine(cfg, terms, norm)
         if total is None:
             raise RuntimeError(f"no loss term computable at step {step} (windows {draws})")
+        if cfg.norm_freeze_step > 0 and step == cfg.norm_freeze_step + 1:
+            # one-time freeze record: the per-run constants the stationary objective
+            # uses from here on. Deterministic, so a crash-resume replaying this step
+            # re-emits identical content (readers dedupe keep-last, the r14 precedent).
+            denoms = {k: norm.last_denom[k] for k in sorted(norm.ema)}
+            floor_ratio = {
+                k: norm.last_denom[k] / (cfg.kappa_floor * norm.first[k] + cfg.eps)
+                for k in sorted(norm.ema) if k.split("_")[0] in ("sc", "tc")
+            }
+            log_f.write(json.dumps({"step": step, "norm_freeze": denoms, "floor_ratio": floor_ratio}) + "\n")
+            log_f.flush()
+            print(f"[norm] froze EMA-path denominators at step {step - 1}: " + json.dumps(denoms))
+            bad = {k: v for k, v in floor_ratio.items() if v > 1.0}
+            if bad:
+                print(f"[norm] WARNING: sc/tc frozen ABOVE the kappa floor {json.dumps(bad)} — "
+                      "norm_freeze_step predates floor engagement (~371-460 in past runs); "
+                      "the freeze is NOT gradient-identical to the historical path here")
         force = None
         if cfg.grad_diag_every and step % cfg.grad_diag_every == 0:
             force = grad_force_diag(cfg, terms, norm, batch, total)  # before backward: needs the graph
@@ -622,6 +646,21 @@ def train(cfg: Config, resume: str | None = None) -> Path:
         if force is not None:
             rec["force"] = force
             rec["denom"] = {k: float(v) for k, v in norm.last_denom.items()}
+            if cfg.norm_freeze_step > 0 and step > cfg.norm_freeze_step:
+                # post-freeze anomaly reads, split by term class (sc/tc: zero false
+                # positives measured over 21k+ frozen-replay steps; syn legitimately
+                # exceeds 1.0 on ~18% of healthy steps, so it warns only at >2.0
+                # on two consecutive diag steps)
+                hot_sct = {k: v for k, v in normalized.items()
+                           if k.split("_")[0] in ("sc", "tc") and v > 1.0}
+                if hot_sct:
+                    print(f"[norm] WARNING @ {step}: frozen sc/tc normalized above 1.0 "
+                          f"{json.dumps(hot_sct)} — sustained raw reversion past the frozen unit")
+                syn_hot = normalized.get("syn", 0.0) > 2.0
+                if syn_hot and syn_hot_prev:
+                    print(f"[norm] WARNING @ {step}: frozen syn normalized > 2.0 on two "
+                          f"consecutive diag steps (now {normalized.get('syn'):.3f})")
+                syn_hot_prev = syn_hot
             if model.context.relational:
                 # engagement meters on the first US draw's scale-1 group, at the
                 # same span run_step used (offset + below-Y fallback replicated)
@@ -765,6 +804,10 @@ def main():
                     help="PairScore non-bilinear pair-scorer ridge width (default 0 = off; REL-3 runs use 16)")
     ap.add_argument("--edge-chunk", type=int, default=None,
                     help="row-chunk for the checkpointed bias MLPs (operational knob, value-exact; default 512)")
+    ap.add_argument("--norm-freeze-step", type=int, default=None,
+                    help="freeze the EMA-path loss normalizers (sc/tc/syn) after this step, making the "
+                    "logged total a stationary train-side equilibrium indicator (recommended 1000; "
+                    "0 = historical EMA path); run-permanent — changes the objective's syn weighting")
     args = ap.parse_args()
 
     cfg = Config.load(args.config) if args.config else Config()
@@ -774,7 +817,7 @@ def main():
               "strat_eval_windows", "data_format", "parquet_dir", "min_history_days",
               "loss_chunk", "devices", "calendar_validity", "calendar_frac",
               "calendar_frac_window", "halt_minfrac", "max_ffill_days", "holdout_pool_windows",
-              "L_ctx", "n_heads_ctx", "psn_rank", "edge_chunk"):
+              "L_ctx", "n_heads_ctx", "psn_rank", "edge_chunk", "norm_freeze_step"):
         v = getattr(args, k)
         if v is not None:
             setattr(cfg, k, v)

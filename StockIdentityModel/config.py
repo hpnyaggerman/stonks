@@ -75,8 +75,14 @@ are not expected to reach zero under any architecture. Retrieval still
 creeping at the horizon = near-misses flipping across rho = 1 with the
 distribution pinned, not quality growth. This run is the measured
 demand precondition behind the REL-3 context upgrade
-(DESIGN_CONTEXT_V2.md) and its comparison baseline. This file's
-defaults = r7's recipe.
+(DESIGN_CONTEXT_V2.md) and its comparison baseline. Stationary-loss
+branch note (norm_freeze_step, DESIGN_LOSS_STATIONARY.md): post-freeze,
+a sustained sc/tc raw reversion reads at full scale forever, where the
+historical EMA would re-absorb it into the denominator within ~100-460
+steps and soften the read back toward 1 — the frozen path is strictly
+louder on collapse-grade reversions, by design (gradient magnitude
+stays capped by the always-on clip either way). This file's defaults =
+r7's recipe.
 """
 from __future__ import annotations
 
@@ -261,6 +267,24 @@ class Config:
                                  # and caps the amplification at 20x instead of 100x. In practice
                                  # the raws fall to <1% of first-step within ~500 steps, so this
                                  # floor IS the sc/tc denominator for the whole run (r7 logs)
+    norm_freeze_step: int = 0    # >0: stop the EMA-path normalizer updates (sc/tc/syn) after this
+                                 # step; denominators freeze at max(EMA_T, kappa_floor*first)+eps
+                                 # and the logged `total` becomes a stationary lambda-weighted
+                                 # objective from T+1 on (level = distance to the training
+                                 # equilibrium; NOT a holdout signal — backtested on r10 it
+                                 # declined 1.47->1.26 straight through a 1.44->1.12 margin bleed;
+                                 # eval curves remain the only model-quality read). 0 = historical
+                                 # EMA path, byte-identical. Run-permanent (changes the objective):
+                                 # NOT a KNOB_FIELD. Recommended T=1000: floor engagement is
+                                 # measured at steps 371-460 (r10/r11/r14, zero re-crossings), so
+                                 # at T=1000 the sc/tc freeze is provably gradient-identical to the
+                                 # floor-pinned historical path and the only objective change is
+                                 # syn (late-run force ~0.5x historical; paired-run protocol +
+                                 # lambda_syn=0.6 fallback in DESIGN_LOSS_STATIONARY.md). Read the
+                                 # scalar as centered 250-step medians (per-step draw noise sd
+                                 # ~0.15); levels compare within a run, not across runs. Historical
+                                 # or flag-off runs get the identical indicator offline via
+                                 # tools/backfill_total.py
     lambda_full: float = 1.0
     lambda_self: float = 0.5
     lambda_peer: float = 0.5

@@ -139,6 +139,37 @@ samples — instead of the newest 16 (`eval_windows`, the always-on acceptance b
 
 Whatever the selector, the retrieval column stays the acceptance read.
 
+## Stationary loss indicator (`norm_freeze_step`)
+
+`--norm-freeze-step 1000` (config `norm_freeze_step`, default 0 = off, byte-identical
+historical path; run-permanent) stops the EMA-path loss normalizers (sc/tc/syn) after
+step T: every denominator becomes a per-run constant and the logged `total` becomes a
+stationary objective from T+1 — globally decreasing while optimization moves, flat only
+at genuine equilibrium. Backtested against the r11/r14/r10 logs: r11 declines every 5k
+segment and flattens at its measured ~10.5k margin plateau (correlation with stratified
+holdout margin −0.94 across the improvement phase); the legacy scalar pinned syn at ≈1
+forever and hid its 2.2× improvement. At T=1000 the sc/tc freeze is measured
+gradient-identical to the historical κ-floor-pinned path (floor engagement ~371–460,
+zero re-crossings in r10/r11/r14); the one objective change is syn, whose late-run
+force decays to ~0.5× historical — priced by a paired run before flag-on becomes the
+recommended default (fallback: `lambda_syn` 0.3→0.6 under freeze).
+
+**It is a train-side indicator only**: backtested on r10 it declined smoothly
+(1.47→1.26) straight through the holdout-margin bleed (1.44→1.12) — it cannot detect
+memorization; eval curves remain the only model-quality signal. Read it as centered
+250-step rolling medians (per-step draw noise sd ≈ 0.15); levels compare within a run,
+not across runs. Steps ≤ T are the historical burn-in and are not indicator-grade.
+
+Historical and flag-off runs get the identical indicator offline:
+
+```bash
+python -m StockIdentityModel.tools.backfill_total --run-dir StockIdentityModel/runs/r11
+# -> runs/r11/total_frozen.jsonl ({step, total_frozen, total_ema}); replay validated
+#    against the run's own logged totals (measured <= 2e-7; aborts loudly above 1e-4)
+```
+
+Full spec, freeze semantics, guard audit, and paired-run protocol: `DESIGN_LOSS_STATIONARY.md`.
+
 ## File map
 
 | File | Responsibility |
