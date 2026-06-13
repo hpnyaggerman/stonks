@@ -1,0 +1,6 @@
+# Optional GPU-only extras for training with the fused selective-scan kernel.
+# Install against a CUDA 12 build of PyTorch (torch>=2.4); bf16 autocast needs an
+# Ampere-or-newer GPU (compute capability >= 8.0). CPU-only hosts need none of these:
+# the model falls back to the pure-PyTorch block in v5/mamba_ref.py for scoring and tests.
+mamba-ssm==2.2.2
+causal-conv1d>=1.2.0

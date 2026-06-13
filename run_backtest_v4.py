@@ -49,7 +49,20 @@ def _get_oos_start():
             pass
     return None
 
+
+def _get_eval_mode():
+    """Evaluation holdout mode recorded by the trainer. Defaults to time-holdout, the
+    mode that carries an OOS start date."""
+    split_path = PROJECT_ROOT / "forecasts" / "split_info.json"
+    if split_path.exists():
+        try:
+            return json.loads(split_path.read_text()).get("eval_mode", "time")
+        except Exception:
+            pass
+    return "time"
+
 OOS_START_DATE = _get_oos_start()
+EVAL_MODE = _get_eval_mode()
 
 # Backtest horizons
 PERIODS = {
@@ -118,8 +131,14 @@ if OOS_START_DATE:
     common_dates = [d for d in common_dates if d >= oos_cutoff]
     print(f"\n[OOS] Backtest starts at {OOS_START_DATE} (test period only; no training or validation dates).")
     print(f"      {len(common_dates)} trading days in backtest window.")
+elif EVAL_MODE == "ticker":
+    # Ticker-holdout has no time cutoff: the forecasts/ directory holds only the
+    # held-out evaluation tickers, which were never trained on, so every date is
+    # legitimately out of sample.
+    print("\n[OOS] eval_mode=ticker: no time cutoff; backtesting held-out tickers over all dates.")
+    print(f"      {len(common_dates)} trading days across the held-out ticker forecasts.")
 else:
-    print("\n[WARNING] No OOS start date. Run the notebook to create forecasts/split_info.json, or set BACKTEST_OOS_START.")
+    print("\n[WARNING] No OOS start date. Run the trainer to create forecasts/split_info.json, or set BACKTEST_OOS_START.")
     print("          Backtest would include in-sample dates → inflated returns. Exiting to avoid accidental use of training data.")
     sys.exit(1)
 
