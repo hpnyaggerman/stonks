@@ -25,6 +25,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -199,18 +200,19 @@ class WindowDataset(Dataset):
         return (torch.from_numpy(win), torch.from_numpy(self.z[i]), torch.from_numpy(self.mask[i]))
 
 
-def _cap_bucket(b, max_windows):
-    """Keep a temporally-spread subset of windows when a cap is set (used to keep the
-    smoke run fast); a no-op otherwise."""
+def _subsample_bucket(b, cap, seed):
+    """Keep a fixed seeded random subset of at most ``cap`` windows; a no-op when
+    ``cap`` is None or the bucket is already smaller. Random (not strided) so the fold
+    stays representative across tickers and dates."""
     n = len(b["start"])
-    if not max_windows or n <= max_windows:
+    if not cap or n <= cap:
         return b
-    keep = np.unique(np.linspace(0, n - 1, max_windows).astype(int))
+    keep = np.sort(np.random.default_rng(seed).choice(n, size=cap, replace=False))
     return {k: [b[k][i] for i in keep] for k in b}
 
 
 def build_memmap_and_samples(frames, scaler, bounds, eval_mode, eval_tickers, val_tickers,
-                             window, max_windows=None):
+                             window, max_windows=None, val_subsample=None, seed=0):
     """Normalize each ticker, write the concatenated fp16 memmap, and enumerate the
     train / val samples and the per-ticker eval surface."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -248,8 +250,8 @@ def build_memmap_and_samples(frames, scaler, bounds, eval_mode, eval_tickers, va
         cursor += n
     mm.flush()
 
-    def pack(b):
-        b = _cap_bucket(b, max_windows)
+    def pack(b, cap):
+        b = _subsample_bucket(b, cap, seed)
         if not b["start"]:
             return None
         return WindowDataset(mm, np.asarray(b["start"], dtype=np.int64),
@@ -257,13 +259,19 @@ def build_memmap_and_samples(frames, scaler, bounds, eval_mode, eval_tickers, va
                              np.asarray(b["z"], dtype=np.float32),
                              np.asarray(b["m"], dtype=np.float32), window)
 
-    return mm, offsets, pack(train), pack(val), eval_surface
+    # Validation is held to a fixed subsample: a full-universe val set is millions of
+    # windows, which would make every early-stop eval and the temperature fit ruinously
+    # slow (and the temperature fit would materialize all val logits and OOM).
+    val_caps = [c for c in (max_windows, val_subsample) if c]
+    val_cap = min(val_caps) if val_caps else None
+    return mm, offsets, pack(train, max_windows), pack(val, val_cap), eval_surface
 
 
 # ------------------------------------------------------------------ training
 
-def train_member(seed, cfg, train_ds, val_ds, device, max_steps, eval_every, patience,
-                 lr, t_max, batch_size):
+def train_member(member_idx, seed, cfg, train_ds, val_ds, device, max_steps,
+                 eval_every_steps, patience, lr, t_max, batch_size, steps_per_epoch,
+                 num_workers, log_every):
     torch.manual_seed(seed)
     model = V5Backbone(cfg).to(device)
     opt = torch.optim.AdamW(optimizer_param_groups(model, weight_decay=0.01),
@@ -275,19 +283,28 @@ def train_member(seed, cfg, train_ds, val_ds, device, max_steps, eval_every, pat
         prog = min(1.0, (step - 1000) / max(1, t_max - 1000))
         return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog))   # cosine 1.0 -> 0.1
 
+    pin = device == "cuda"
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False,
-                        generator=torch.Generator().manual_seed(seed))
+                        num_workers=num_workers, persistent_workers=num_workers > 0,
+                        pin_memory=pin, generator=torch.Generator().manual_seed(seed))
     # bf16 autocast on GPU only (the selective scan keeps fp32 internally); a no-op on
     # CPU, where bf16 autocast is unsupported and the fallback block runs fp32.
     amp = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
            if device == "cuda" else contextlib.nullcontext())
     best_val, best_state, since_improve, step = float("inf"), None, 0, 0
+    loss_ema, t0, stop = None, time.time(), False
+    print(f"[member {member_idx}] start | {len(train_ds)} train / "
+          f"{0 if val_ds is None else len(val_ds)} val windows | {steps_per_epoch} steps/epoch | "
+          f"eval every {eval_every_steps} steps | max {max_steps} steps | patience {patience}")
     model.train()
-    while step < max_steps:
+    while step < max_steps and not stop:
         for x, z, m in loader:
-            x, z, m = x.to(device), z.to(device), m.to(device)
+            x = x.to(device, non_blocking=pin)
+            z = z.to(device, non_blocking=pin)
+            m = m.to(device, non_blocking=pin)
+            cur_lr = lr * lr_at(step)
             for g in opt.param_groups:
-                g["lr"] = lr * lr_at(step)
+                g["lr"] = cur_lr
             opt.zero_grad()
             with amp:
                 loss = v5_loss(model(x), z, m, cfg)
@@ -295,30 +312,47 @@ def train_member(seed, cfg, train_ds, val_ds, device, max_steps, eval_every, pat
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             step += 1
-            if step % eval_every == 0 or step >= max_steps:
-                vce = evaluate_ce(model, val_ds, cfg, device, batch_size) if val_ds else loss.item()
-                if vce < best_val - 1e-5:
-                    best_val, best_state, since_improve = vce, {k: v.detach().cpu().clone()
-                                                                 for k, v in model.state_dict().items()}, 0
+            lv = loss.item()
+            loss_ema = lv if loss_ema is None else 0.98 * loss_ema + 0.02 * lv
+            if step % log_every == 0:
+                sps = step / max(1e-9, time.time() - t0)
+                print(f"[member {member_idx}] step {step}/{max_steps} (ep {step / steps_per_epoch:.2f}) | "
+                      f"loss {loss_ema:.4f} | lr {cur_lr:.2e} | {sps:.1f} it/s | "
+                      f"eta {(max_steps - step) / max(1e-9, sps) / 60:.0f}m")
+            if step % eval_every_steps == 0 or step >= max_steps:
+                vce = (evaluate_ce(model, val_ds, cfg, device, batch_size, num_workers)
+                       if val_ds else lv)
+                improved = vce < best_val - 1e-5
+                if improved:
+                    best_val = vce
+                    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    since_improve = 0
                 else:
                     since_improve += 1
+                print(f"[member {member_idx}] EVAL step {step} (ep {step / steps_per_epoch:.2f}) | "
+                      f"val_ce {vce:.4f} | best {best_val:.4f} | "
+                      f"{'IMPROVED' if improved else f'no-improve {since_improve}/{patience}'}")
                 if since_improve >= patience or step >= max_steps:
+                    stop = True
                     break
-        if since_improve >= patience or step >= max_steps:
-            break
     if best_state is not None:
         model.load_state_dict(best_state)
+    print(f"[member {member_idx}] done | {step} steps | best val CE {best_val:.4f} | "
+          f"{(time.time() - t0) / 60:.1f} min")
     return model, best_val
 
 
 @torch.no_grad()
-def evaluate_ce(model, ds, cfg, device, batch_size):
+def evaluate_ce(model, ds, cfg, device, batch_size, num_workers=0):
     was_training = model.training
     model.eval()
-    loader = DataLoader(ds, batch_size=batch_size)
+    pin = device == "cuda"
+    loader = DataLoader(ds, batch_size=batch_size, num_workers=num_workers, pin_memory=pin)
     total, count = 0.0, 0
     for x, z, m in loader:
-        x, z, m = x.to(device), z.to(device), m.to(device)
+        x = x.to(device, non_blocking=pin)
+        z = z.to(device, non_blocking=pin)
+        m = m.to(device, non_blocking=pin)
         n = int(m.sum().item())
         if n:
             total += v5_loss(model(x), z, m, cfg).item() * n
@@ -331,14 +365,18 @@ def evaluate_ce(model, ds, cfg, device, batch_size):
 # -------------------------------------------------------------- calibration
 
 @torch.no_grad()
-def fit_temperatures(members, val_ds, cfg, device, batch_size):
+def fit_temperatures(members, val_ds, cfg, device, batch_size, num_workers=0):
     """Per-horizon temperatures minimizing the masked 3-class NLL of the ensemble mean.
 
-    Logits are cached once; the 1-D search per horizon is then pure arithmetic.
+    Logits are cached once over the (subsampled) validation fold; the 1-D search per
+    horizon is then pure arithmetic. The fold is bounded by ``--val-subsample`` so this
+    cache cannot grow to the full universe and OOM.
     """
     if val_ds is None or len(val_ds) == 0:
         return [1.0] * len(cfg.horizons)
-    loader = DataLoader(val_ds, batch_size=batch_size)
+    print(f"[v5] fitting temperatures on {len(val_ds)} val windows ...")
+    loader = DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers,
+                        pin_memory=device == "cuda")
     logits_all, z_all, m_all = [], [], []
     for x, z, m in loader:
         x = x.to(device)
@@ -502,13 +540,19 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--max-steps", type=int, default=200_000)
     p.add_argument("--t-max", type=int, default=200_000)
-    p.add_argument("--eval-every", type=int, default=2000)
-    p.add_argument("--patience", type=int, default=15)
+    p.add_argument("--eval-every-epochs", type=float, default=1.0,
+                   help="Validate every N epochs (fractional allowed for finer cadence).")
+    p.add_argument("--patience", type=int, default=5,
+                   help="Early-stop after this many evaluations without improvement.")
+    p.add_argument("--val-subsample", type=int, default=150_000,
+                   help="Fixed seeded validation fold size for early-stop and temperature fit.")
+    p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
+    p.add_argument("--log-every", type=int, default=50, help="Steps between progress logs.")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--tickers", nargs="*", default=None, help="Explicit ticker list.")
     p.add_argument("--max-windows", type=int, default=None,
-                   help="Cap train/val windows (temporally spread subset).")
+                   help="Cap train/val windows (smoke only; spread subset).")
     p.add_argument("--max-forecast-rows", type=int, default=None,
                    help="Cap forecast rows per ticker (most recent kept).")
     p.add_argument("--smoke", action="store_true",
@@ -522,7 +566,8 @@ def main():
         args.members = args.members if args.members <= 2 else 2
         args.window, args.d_model, args.n_blocks = 130, 48, 2
         args.batch_size, args.max_steps, args.t_max = 32, 24, 24
-        args.eval_every, args.patience = 12, 2
+        args.eval_every_epochs, args.patience = 1.0, 2
+        args.num_workers, args.log_every = 0, 8
         if args.max_tickers is None:
             args.max_tickers = 6
         if args.max_windows is None:
@@ -589,24 +634,31 @@ def main():
 
     mm, offsets, train_ds, val_ds, eval_surface = build_memmap_and_samples(
         frames, scaler, bounds, args.eval_mode, eval_tickers, val_tickers, cfg.window,
-        max_windows=args.max_windows)
+        max_windows=args.max_windows, val_subsample=args.val_subsample, seed=args.seed)
     print(f"[v5] train windows: {0 if train_ds is None else len(train_ds)} | "
-          f"val windows: {0 if val_ds is None else len(val_ds)} | "
+          f"val windows (subsampled): {0 if val_ds is None else len(val_ds)} | "
           f"eval tickers: {len(eval_surface)}")
     if train_ds is None:
         raise SystemExit("no training windows")
 
+    steps_per_epoch = max(1, math.ceil(len(train_ds) / args.batch_size))
+    eval_every_steps = max(1, round(args.eval_every_epochs * steps_per_epoch))
+    print(f"[v5] schedule | {steps_per_epoch} steps/epoch | ~{args.t_max / steps_per_epoch:.1f} epochs "
+          f"to t_max | eval every {args.eval_every_epochs}ep ({eval_every_steps} steps) | "
+          f"workers {args.num_workers}")
+
     seeds = [args.seed + 100 * i for i in range(args.members)]
     members = []
     for i, s in enumerate(seeds):
-        model, vce = train_member(s, cfg, train_ds, val_ds, args.device, args.max_steps,
-                                   args.eval_every, args.patience, args.lr, args.t_max, args.batch_size)
+        model, vce = train_member(i, s, cfg, train_ds, val_ds, args.device, args.max_steps,
+                                   eval_every_steps, args.patience, args.lr, args.t_max,
+                                   args.batch_size, steps_per_epoch, args.num_workers, args.log_every)
         model.eval()
         torch.save(model.state_dict(), V5_MODEL_DIR / f"member_{i}.pt")
         members.append(model)
         print(f"[v5] member {i} (seed {s}) best val CE = {vce:.4f}")
 
-    temps = fit_temperatures(members, val_ds, cfg, args.device, args.batch_size)
+    temps = fit_temperatures(members, val_ds, cfg, args.device, args.batch_size, args.num_workers)
     print(f"[v5] temperatures: {[round(t, 3) for t in temps]}")
 
     write_artifacts(cfg, scaler, bounds, args.eval_mode, args.seed, args.ticker_holdout_frac,
