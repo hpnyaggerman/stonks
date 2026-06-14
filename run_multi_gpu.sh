@@ -39,7 +39,8 @@ export PYTHONUNBUFFERED=1   # unbuffered so per-GPU logs stream live, not in 8 K
 # Shared across every process so the scaler / splits / val-fold are identical and the
 # ensemble is valid. Override anything here by appending to the script's extra args.
 COMMON=(--members "$MEMBERS" --eval-mode time --seed 42 --batch-size 256 --num-workers 8
-        --eval-every-epochs 1 --patience 5 --val-subsample 150000 --log-every 100 --device cuda)
+        --epochs 3 --eval-every-steps 2000 --patience 20 --val-subsample 150000
+        --log-every 100 --device cuda)
 
 echo "[multi-gpu] GPUs=${GPU_IDS[*]} | members/GPU=$PER_GPU | total members=$MEMBERS"
 echo "[multi-gpu] args: ${COMMON[*]} ${EXTRA[*]+${EXTRA[*]}}"

@@ -34,7 +34,8 @@ from torch.utils.data import DataLoader, Dataset
 
 import features_v5 as fx
 from features_v5 import HORIZON_DAYS, MIN_REAL_ROWS, N_FEATURES
-from v5_backbone import V5Backbone, V5Config, ensemble_predict, optimizer_param_groups, v5_loss
+from v5_backbone import (V5Backbone, V5Config, ensemble_predict, hl_gauss_targets,
+                         optimizer_param_groups, v5_loss)
 from v5.forecast import HORIZON_LABELS, build_forecast_columns
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -44,6 +45,7 @@ FORECAST_DIR = PROJECT_ROOT / "forecasts"
 CACHE_DIR = PROJECT_ROOT / "cache" / "v5"
 CLASS_NAMES = ("down", "neutral", "up")
 STALENESS_K = 63
+DEFAULT_EVAL_DAYS = 254          # trading sessions reserved for EACH of val and oos (fixed tails)
 
 
 # ----------------------------------------------------------------- universe
@@ -118,14 +120,28 @@ def class_rate_log(frames, bounds, cfg):
     return rates
 
 
-def global_date_bounds(frames):
+def global_date_bounds(frames, eval_days=DEFAULT_EVAL_DAYS):
+    """Fixed-size chronological tails: the last ``eval_days`` unique trading sessions are the
+    OOS split, the ``eval_days`` before that are validation, and every earlier session is
+    training. Train therefore gets all but ``2 * eval_days`` sessions (maximum historical
+    exposure), and val/oos stay adjacent in time to train instead of sitting on a far, thin
+    calendar slice. Eval windows still draw their look-back from before the tail, so the
+    short tails cost no warm-up.
+
+    ``train_cut`` is the first validation session and ``train_val_cut`` the first OOS session,
+    so the returned keys keep the meaning the rest of the pipeline already expects. Requires
+    at least ``2 * eval_days`` unique sessions.
+    """
     all_dates = np.concatenate([f.dates for f in frames.values()])
     unique = np.unique(all_dates)
+    if len(unique) < 2 * eval_days:
+        raise SystemExit(
+            f"need >= {2 * eval_days} unique trading sessions for {eval_days}-session "
+            f"val+oos tails; have {len(unique)}. Lower --eval-days or add history.")
     dmin, dmax = unique.min(), unique.max()
-    span = dmax - dmin
-    train_val_cut = dmin + span * 0.8
-    train_cut = dmin + (train_val_cut - dmin) * 0.8
-    train_end = unique[unique < train_cut].max() if (unique < train_cut).any() else dmin
+    train_cut = unique[-2 * eval_days]          # first validation session
+    train_val_cut = unique[-eval_days]          # first OOS session (== oos_start)
+    train_end = unique[unique < train_cut].max()
     val_mask = (unique >= train_cut) & (unique < train_val_cut)
     val_end = unique[val_mask].max() if val_mask.any() else train_end
     return {
@@ -273,7 +289,7 @@ def build_memmap_and_samples(frames, scaler, bounds, eval_mode, eval_tickers, va
 
 def train_member(member_idx, seed, cfg, train_ds, val_ds, device, max_steps,
                  eval_every_steps, patience, lr, t_max, batch_size, steps_per_epoch,
-                 num_workers, log_every):
+                 num_workers, log_every, val_base=None):
     torch.manual_seed(seed)
     model = V5Backbone(cfg).to(device)
     opt = torch.optim.AdamW(optimizer_param_groups(model, weight_decay=0.01),
@@ -331,8 +347,10 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, device, max_steps,
                     since_improve = 0
                 else:
                     since_improve += 1
+                base_str = ("" if val_base is None
+                            else f" | base {val_base:.4f} {'BEAT' if vce < val_base else 'MISS'}")
                 print(f"[member {member_idx}] EVAL step {step} (ep {step / steps_per_epoch:.2f}) | "
-                      f"val_ce {vce:.4f} | best {best_val:.4f} | "
+                      f"val_ce {vce:.4f} | best {best_val:.4f}{base_str} | "
                       f"{'IMPROVED' if improved else f'no-improve {since_improve}/{patience}'}")
                 if since_improve >= patience or step >= max_steps:
                     stop = True
@@ -361,6 +379,35 @@ def evaluate_ce(model, ds, cfg, device, batch_size, num_workers=0):
             count += n
     if was_training:
         model.train()
+    return total / count if count else float("inf")
+
+
+@torch.no_grad()
+def val_marginal_baseline_ce(val_ds, cfg, lam_cls=0.1):
+    """Loss of the best input-ignoring predictor on the val fold: the per-horizon marginal
+    histogram (its mean HL-Gauss soft target) plus the marginal 3-class term, mask-weighted
+    exactly like :func:`evaluate_ce`. The trained model must beat this to be learning
+    anything conditional; a run that sits at this line (or at ``log(n_bins)``) has collapsed
+    to the prior. Logged every eval so that failure mode is visible immediately.
+    """
+    z = torch.from_numpy(np.asarray(val_ds.z, dtype=np.float32))
+    m = torch.from_numpy(np.asarray(val_ds.mask, dtype=np.float32))
+    soft = hl_gauss_targets(torch.nan_to_num(z), cfg)                  # (N, H, n_bins)
+    theta = torch.tensor(cfg.theta_bins, dtype=z.dtype) * cfg.bin_width
+    znz = torch.nan_to_num(z)
+    cls = (znz > -theta).long() + (znz > theta).long()                # (N, H)
+    total, count = 0.0, 0.0
+    for h in range(len(cfg.horizons)):
+        mh = m[:, h]
+        nh = float(mh.sum())
+        if nh < 1:
+            continue
+        q = (soft[:, h] * mh[:, None]).sum(0) / nh                    # mean soft target
+        h_hist = float(-(q * q.clamp_min(1e-12).log()).sum())
+        rate = torch.stack([((cls[:, h] == c).float() * mh).sum() / nh for c in range(3)])
+        h_cls = float(-(rate * rate.clamp_min(1e-12).log()).sum())
+        total += nh * (h_hist + lam_cls * h_cls)
+        count += nh
     return total / count if count else float("inf")
 
 
@@ -415,9 +462,12 @@ def fit_temperatures(members, val_ds, cfg, device, batch_size, num_workers=0):
 
 @torch.no_grad()
 def make_forecast(members, frames, offsets, mm, eval_surface, cfg, temps, device, batch_size,
-                  max_rows=None):
+                  max_rows=None, log_every=250):
     FORECAST_DIR.mkdir(parents=True, exist_ok=True)
-    written = 0
+    total = sum(1 for a in eval_surface.values() if a)
+    written, rows_done, t0 = 0, 0, time.time()
+    print(f"[v5] forecasting {total} eval tickers "
+          f"({'all OOS rows' if not max_rows else f'<= {max_rows} rows each'}) ...", flush=True)
     for ticker, anchors in eval_surface.items():
         if not anchors:
             continue
@@ -454,6 +504,15 @@ def make_forecast(members, frames, offsets, mm, eval_surface, cfg, temps, device
         import pandas as pd
         pd.DataFrame(cols).to_csv(FORECAST_DIR / f"{ticker}_forecast.csv", index=False)
         written += 1
+        rows_done += len(anchors)
+        if written % log_every == 0:
+            el = time.time() - t0
+            rate = written / max(1e-9, el)
+            eta = (total - written) / max(1e-9, rate)
+            print(f"[v5] forecast {written}/{total} tickers | {rows_done} rows | "
+                  f"{el / 60:.1f}m elapsed | {rate:.1f} tic/s | eta {eta / 60:.0f}m", flush=True)
+    print(f"[v5] forecast complete | {written}/{total} tickers | {rows_done} rows | "
+          f"{(time.time() - t0) / 60:.1f}m", flush=True)
     return written
 
 
@@ -540,12 +599,22 @@ def parse_args():
     p.add_argument("--d-model", type=int, default=256)
     p.add_argument("--n-blocks", type=int, default=6)
     p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--max-steps", type=int, default=200_000)
-    p.add_argument("--t-max", type=int, default=200_000)
-    p.add_argument("--eval-every-epochs", type=float, default=1.0,
-                   help="Validate every N epochs (fractional allowed for finer cadence).")
-    p.add_argument("--patience", type=int, default=5,
-                   help="Early-stop after this many evaluations without improvement.")
+    p.add_argument("--eval-days", type=int, default=DEFAULT_EVAL_DAYS,
+                   help="Trading sessions reserved for EACH of validation and OOS (fixed "
+                        "chronological tails); all earlier sessions are training.")
+    p.add_argument("--epochs", type=float, default=3.0,
+                   help="Training budget in epochs (one pass over the train windows). The "
+                        "step budget is derived from this so it auto-scales with the data.")
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="Hard step-budget override; takes precedence over --epochs.")
+    p.add_argument("--t-max", type=int, default=None,
+                   help="Cosine-decay horizon in steps; defaults to the step budget.")
+    p.add_argument("--eval-every-steps", type=int, default=2000,
+                   help="Validate every N optimizer steps. Step-based so the cadence does "
+                        "not silently coarsen as the train set grows.")
+    p.add_argument("--patience", type=int, default=20,
+                   help="Early-stop after this many evals without improvement "
+                        "(no-improve budget = patience * eval-every-steps).")
     p.add_argument("--val-subsample", type=int, default=150_000,
                    help="Fixed seeded validation fold size for early-stop and temperature fit.")
     p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
@@ -580,7 +649,8 @@ def main():
         args.members = args.members if args.members <= 2 else 2
         args.window, args.d_model, args.n_blocks = 130, 48, 2
         args.batch_size, args.max_steps, args.t_max = 32, 24, 24
-        args.eval_every_epochs, args.patience = 1.0, 2
+        args.eval_every_steps, args.patience = 8, 2
+        args.eval_days = 40
         args.num_workers, args.log_every = 0, 8
         if args.max_tickers is None:
             args.max_tickers = 6
@@ -621,7 +691,7 @@ def main():
     if not frames:
         raise SystemExit("no usable tickers (need > min_real_rows history)")
 
-    bounds = global_date_bounds(frames)
+    bounds = global_date_bounds(frames, args.eval_days)
     eval_tickers = assign_eval_tickers(sorted(frames), args.seed, args.ticker_holdout_frac)
     # Under ticker-only holdout a small fold of train tickers becomes the validation set.
     val_tickers = set()
@@ -688,17 +758,24 @@ def main():
         if not 0 <= start < end <= args.members:
             raise SystemExit(f"invalid member range [{start}, {end}) for --members {args.members}")
         steps_per_epoch = max(1, math.ceil(len(train_ds) / args.batch_size))
-        eval_every_steps = max(1, round(args.eval_every_epochs * steps_per_epoch))
-        print(f"[v5] schedule | {steps_per_epoch} steps/epoch | "
-              f"~{args.t_max / steps_per_epoch:.1f} epochs to t_max | "
-              f"eval every {args.eval_every_epochs}ep ({eval_every_steps} steps) | "
-              f"workers {args.num_workers} | training members [{start}, {end})")
+        max_steps = args.max_steps if args.max_steps else math.ceil(args.epochs * steps_per_epoch)
+        t_max = args.t_max if args.t_max else max_steps
+        eval_every_steps = max(1, args.eval_every_steps)
+        val_base = val_marginal_baseline_ce(val_ds, cfg) if val_ds is not None else None
+        print(f"[v5] schedule | {steps_per_epoch} steps/epoch | budget {max_steps} steps "
+              f"(~{max_steps / steps_per_epoch:.1f} ep) | t_max {t_max} | "
+              f"eval every {eval_every_steps} steps | patience {args.patience} "
+              f"(~{eval_every_steps * args.patience} steps no-improve) | "
+              f"workers {args.num_workers} | members [{start}, {end})")
+        if val_base is not None:
+            print(f"[v5] val constant-marginal baseline CE = {val_base:.4f} "
+                  f"(model must beat this to be learning anything conditional)")
         members = []
         for i in range(start, end):
             model, vce = train_member(i, seeds[i], cfg, train_ds, val_ds, args.device,
-                                       args.max_steps, eval_every_steps, args.patience, args.lr,
-                                       args.t_max, args.batch_size, steps_per_epoch,
-                                       args.num_workers, args.log_every)
+                                       max_steps, eval_every_steps, args.patience, args.lr,
+                                       t_max, args.batch_size, steps_per_epoch,
+                                       args.num_workers, args.log_every, val_base)
             model.eval()
             torch.save(model.state_dict(), V5_MODEL_DIR / f"member_{i}.pt")
             members.append(model)
