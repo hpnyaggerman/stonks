@@ -1,2 +1,13 @@
 [v5] device=cuda | visible GPUs=2 | current=cuda:0 (NVIDIA GeForce RTX 4090)
 [v5] building frames for 7597 tickers ...
+[v5] usable frames: 7094
+[v5] eval_mode=time eval_tickers=0 val_tickers=0
+[v5] scaler fit on 5533114 train rows
+[v5] era-proxy audit (|rho|>0.2): boll_width=+0.22, Volatility_10=+0.24, Volatility_20=+0.26, Volatility_30=+0.27, volatility_5d=+0.21, volatility_20d=+0.26, log_sigma_hat=+0.29, intraday_range=+0.21
+[v5] class rates [train] (down/neutral/up): 1d:[0.21, 0.58, 0.21]  1w:[0.21, 0.57, 0.22]  1m:[0.21, 0.56, 0.24]  6m:[0.21, 0.53, 0.26]
+[v5] class rates [val] (down/neutral/up): 1d:[0.21, 0.58, 0.22]  1w:[0.21, 0.56, 0.23]  1m:[0.2, 0.54, 0.25]  6m:[0.21, 0.51, 0.28]
+[v5] class rates [oos] (down/neutral/up): 1d:[0.21, 0.58, 0.21]  1w:[0.22, 0.56, 0.22]  1m:[0.23, 0.54, 0.24]  6m:[0.24, 0.51, 0.26]
+[v5] train windows: 5258847 | val windows (subsampled): 150000 | eval tickers: 6961
+[v5] forecast-only: loaded 4 members from /home/hkyouma/stonks/stonks/models/v5
+[v5] fitting temperatures on 150000 val windows ...
+[v5] temperatures: [1.0, 1.2, 2.6, 4.5]
