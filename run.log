@@ -1,0 +1,7 @@
+[multi-gpu] GPUs=0 1 | members/GPU=2 | total members=4
+[multi-gpu] args: --members 4 --eval-mode time --seed 42 --batch-size 256 --num-workers 8 --eval-every-epochs 1 --patience 5 --val-subsample 150000 --log-every 100 --device cuda --eval-mode time --num-workers 8 --batch-size 256 --eval-every-epochs 0.5 --patience 5
+[multi-gpu] phys GPU 0 -> members [0, 2) -> train_gpu0.log
+[multi-gpu] phys GPU 1 -> members [2, 4) -> train_gpu1.log
+[multi-gpu] all 4 members trained; finalizing (temperatures + artifacts + forecasts)
+[v5] device=cuda | visible GPUs=2 | current=cuda:0 (NVIDIA GeForce RTX 4090)
+[v5] building frames for 7597 tickers ...
