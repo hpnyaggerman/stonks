@@ -212,12 +212,14 @@ def _subsample_bucket(b, cap, seed):
 
 
 def build_memmap_and_samples(frames, scaler, bounds, eval_mode, eval_tickers, val_tickers,
-                             window, max_windows=None, val_subsample=None, seed=0):
+                             window, max_windows=None, val_subsample=None, seed=0, cache_dir=None):
     """Normalize each ticker, write the concatenated fp16 memmap, and enumerate the
-    train / val samples and the per-ticker eval surface."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    train / val samples and the per-ticker eval surface. ``cache_dir`` isolates the
+    memmap so concurrent processes (one per GPU) do not write the same file."""
+    cache_dir = cache_dir or CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
     total_rows = sum(len(f.dates) for f in frames.values())
-    mm_path = CACHE_DIR / "features_f16.dat"
+    mm_path = cache_dir / "features_f16.dat"
     mm = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=(total_rows, N_FEATURES))
 
     offsets, cursor = {}, 0
@@ -555,6 +557,18 @@ def parse_args():
                    help="Cap train/val windows (smoke only; spread subset).")
     p.add_argument("--max-forecast-rows", type=int, default=None,
                    help="Cap forecast rows per ticker (most recent kept).")
+    # Multi-GPU ensemble split: run one process per GPU over disjoint member ranges,
+    # each with its own --cache-dir, then a single --forecast-only pass to finalize.
+    p.add_argument("--member-start", type=int, default=0,
+                   help="Index of the first ensemble member this process trains.")
+    p.add_argument("--member-count", type=int, default=None,
+                   help="Members to train from --member-start (default: all remaining).")
+    p.add_argument("--cache-dir", default=None,
+                   help="Feature-memmap directory; give concurrent processes distinct dirs.")
+    p.add_argument("--skip-forecast", action="store_true",
+                   help="Train the member range only; skip temperatures/artifacts/forecasts.")
+    p.add_argument("--forecast-only", action="store_true",
+                   help="Skip training; load all members and write temperatures/artifacts/forecasts.")
     p.add_argument("--smoke", action="store_true",
                    help="Tiny model/universe/step budget for a CPU end-to-end check.")
     return p.parse_args()
@@ -578,6 +592,17 @@ def main():
     MODELS_DIR.mkdir(exist_ok=True)
     V5_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     FORECAST_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Log the resolved device so a multi-GPU split can confirm each process pinned its
+    # own card: under CUDA_VISIBLE_DEVICES=k the count is 1 and current is cuda:0.
+    if args.device == "cuda" and torch.cuda.is_available():
+        idx = torch.cuda.current_device()
+        print(f"[v5] device=cuda | visible GPUs={torch.cuda.device_count()} | "
+              f"current=cuda:{idx} ({torch.cuda.get_device_name(idx)})")
+    elif args.device == "cuda":
+        print("[v5] device=cuda requested but CUDA is unavailable — placement will fail")
+    else:
+        print(f"[v5] device={args.device}")
 
     if args.eval_mode == "ticker" and args.ticker_holdout_frac <= 0:
         raise SystemExit("ticker eval mode requires --ticker-holdout-frac > 0")
@@ -632,35 +657,61 @@ def main():
                               for hi, lbl in enumerate(HORIZON_LABELS))
             print(f"[v5] class rates [{s}] (down/neutral/up): {per_h}")
 
+    cache_dir = Path(args.cache_dir) if args.cache_dir else CACHE_DIR
     mm, offsets, train_ds, val_ds, eval_surface = build_memmap_and_samples(
         frames, scaler, bounds, args.eval_mode, eval_tickers, val_tickers, cfg.window,
-        max_windows=args.max_windows, val_subsample=args.val_subsample, seed=args.seed)
+        max_windows=args.max_windows, val_subsample=args.val_subsample, seed=args.seed,
+        cache_dir=cache_dir)
     print(f"[v5] train windows: {0 if train_ds is None else len(train_ds)} | "
           f"val windows (subsampled): {0 if val_ds is None else len(val_ds)} | "
           f"eval tickers: {len(eval_surface)}")
-    if train_ds is None:
-        raise SystemExit("no training windows")
 
-    steps_per_epoch = max(1, math.ceil(len(train_ds) / args.batch_size))
-    eval_every_steps = max(1, round(args.eval_every_epochs * steps_per_epoch))
-    print(f"[v5] schedule | {steps_per_epoch} steps/epoch | ~{args.t_max / steps_per_epoch:.1f} epochs "
-          f"to t_max | eval every {args.eval_every_epochs}ep ({eval_every_steps} steps) | "
-          f"workers {args.num_workers}")
-
+    # Member seeds are global (indexed by member id), so a multi-GPU split that trains
+    # disjoint ranges still produces distinct init + shuffle per member.
     seeds = [args.seed + 100 * i for i in range(args.members)]
-    members = []
-    for i, s in enumerate(seeds):
-        model, vce = train_member(i, s, cfg, train_ds, val_ds, args.device, args.max_steps,
-                                   eval_every_steps, args.patience, args.lr, args.t_max,
-                                   args.batch_size, steps_per_epoch, args.num_workers, args.log_every)
-        model.eval()
-        torch.save(model.state_dict(), V5_MODEL_DIR / f"member_{i}.pt")
-        members.append(model)
-        print(f"[v5] member {i} (seed {s}) best val CE = {vce:.4f}")
+
+    if args.forecast_only:
+        members = []
+        for i in range(args.members):
+            ckpt = V5_MODEL_DIR / f"member_{i}.pt"
+            if not ckpt.exists():
+                raise SystemExit(f"--forecast-only needs every member; missing {ckpt}")
+            model = V5Backbone(cfg)
+            model.load_state_dict(torch.load(ckpt, map_location=args.device))
+            members.append(model.to(args.device).eval())
+        print(f"[v5] forecast-only: loaded {len(members)} members from {V5_MODEL_DIR}")
+    else:
+        if train_ds is None:
+            raise SystemExit("no training windows")
+        start = args.member_start
+        end = min(start + (args.member_count or args.members), args.members)
+        if not 0 <= start < end <= args.members:
+            raise SystemExit(f"invalid member range [{start}, {end}) for --members {args.members}")
+        steps_per_epoch = max(1, math.ceil(len(train_ds) / args.batch_size))
+        eval_every_steps = max(1, round(args.eval_every_epochs * steps_per_epoch))
+        print(f"[v5] schedule | {steps_per_epoch} steps/epoch | "
+              f"~{args.t_max / steps_per_epoch:.1f} epochs to t_max | "
+              f"eval every {args.eval_every_epochs}ep ({eval_every_steps} steps) | "
+              f"workers {args.num_workers} | training members [{start}, {end})")
+        members = []
+        for i in range(start, end):
+            model, vce = train_member(i, seeds[i], cfg, train_ds, val_ds, args.device,
+                                       args.max_steps, eval_every_steps, args.patience, args.lr,
+                                       args.t_max, args.batch_size, steps_per_epoch,
+                                       args.num_workers, args.log_every)
+            model.eval()
+            torch.save(model.state_dict(), V5_MODEL_DIR / f"member_{i}.pt")
+            members.append(model)
+            print(f"[v5] member {i} (seed {seeds[i]}) best val CE = {vce:.4f}")
+        if start != 0 or end != args.members or args.skip_forecast:
+            print(f"[v5] trained members [{start}, {end}); checkpoints in {V5_MODEL_DIR}. "
+                  f"Once all {args.members} exist, run --forecast-only (same --seed/--members/"
+                  f"universe) to write temperatures, artifacts, and forecasts.")
+            print("[v5] done (partial run).")
+            return
 
     temps = fit_temperatures(members, val_ds, cfg, args.device, args.batch_size, args.num_workers)
     print(f"[v5] temperatures: {[round(t, 3) for t in temps]}")
-
     write_artifacts(cfg, scaler, bounds, args.eval_mode, args.seed, args.ticker_holdout_frac,
                     eval_tickers, temps, seeds)
     n_fc = make_forecast(members, frames, offsets, mm, eval_surface, cfg, temps,
