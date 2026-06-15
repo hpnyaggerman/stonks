@@ -1,0 +1,19 @@
+[multi-gpu] GPUs=0 1 2 3 | members/GPU=1 | total members=4
+[multi-gpu] args: --members 4 --eval-mode time --seed 42 --batch-size 256 --num-workers 8 --epochs 3 --eval-every-steps 2000 --patience 20 --val-subsample 150000 --log-every 100 --device cuda --eval-mode time --epochs 20 --eval-every-steps 10000 --patience 10 --val-subsample 1000000
+[multi-gpu] phys GPU 0 -> members [0, 1) -> train_gpu0.log
+[multi-gpu] phys GPU 1 -> members [1, 2) -> train_gpu1.log
+[multi-gpu] phys GPU 2 -> members [2, 3) -> train_gpu2.log
+[multi-gpu] phys GPU 3 -> members [3, 4) -> train_gpu3.log
+[multi-gpu] all 4 members trained; finalizing (temperatures + artifacts + forecasts)
+[v5] device=cuda | visible GPUs=4 | current=cuda:0 (NVIDIA GeForce RTX 5090)
+[v5] building frames for 7597 tickers ...
+[v5] usable frames: 7094
+[v5] eval_mode=time eval_tickers=0 val_tickers=0
+[v5] scaler fit on 23948324 train rows
+[v5] era-proxy audit (|rho|>0.2): none
+[v5] class rates [train] (down/neutral/up): 1d:[0.21, 0.58, 0.21]  1w:[0.21, 0.57, 0.22]  1m:[0.21, 0.54, 0.24]  6m:[0.22, 0.51, 0.26]
+[v5] class rates [val] (down/neutral/up): 1d:[0.21, 0.59, 0.21]  1w:[0.22, 0.56, 0.22]  1m:[0.23, 0.53, 0.23]  6m:[0.23, 0.52, 0.25]
+[v5] class rates [oos] (down/neutral/up): 1d:[0.21, 0.58, 0.21]  1w:[0.21, 0.56, 0.23]  1m:[0.22, 0.53, 0.25]  6m:[0.23, 0.46, 0.31]
+run_multi_gpu.sh: line 71: 40094 Bus error               python run_train_v5.py "${COMMON[@]}" ${EXTRA[@]+"${EXTRA[@]}"} --forecast-only 2>&1
+     40095 Done                    | tee finalize.log
+ERROR conda.cli.main_run:execute(148): `conda run bash run_multi_gpu.sh 1 --eval-mode time --epochs 20 --eval-every-steps 10000 --patience 10 --val-subsample 1000000` failed. (See above for error)
