@@ -30,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 import features_v5 as fx
 from features_v5 import HORIZON_DAYS, MIN_REAL_ROWS, N_FEATURES
@@ -289,17 +289,23 @@ def build_memmap_and_samples(frames, scaler, bounds, eval_mode, eval_tickers, va
 
 def train_member(member_idx, seed, cfg, train_ds, val_ds, device, max_steps,
                  eval_every_steps, patience, lr, t_max, batch_size, steps_per_epoch,
-                 num_workers, log_every, val_base=None):
+                 num_workers, log_every, val_base=None, *, lr_patience=4, lr_factor=0.5,
+                 min_lr_scale=0.04, warmup_steps=1000, calibrate=True, cal_cap=100_000):
     torch.manual_seed(seed)
     model = V5Backbone(cfg).to(device)
     opt = torch.optim.AdamW(optimizer_param_groups(model, weight_decay=0.01),
                             lr=lr, betas=(0.9, 0.95))
 
+    # Plateau LR schedule (Defect-1 fix): warm-up, then a constant scale the eval block
+    # multiplies down whenever validation stalls. There is no t_max horizon -> decay is
+    # driven by the same val signal as early-stop and cannot decouple from the run length.
+    lr_scale = 1.0
+    plateau_since_drop = 0
+
     def lr_at(step):
-        if step < 1000:
-            return (step + 1) / 1000
-        prog = min(1.0, (step - 1000) / max(1, t_max - 1000))
-        return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog))   # cosine 1.0 -> 0.1
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        return lr_scale
 
     pin = device == "cuda"
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False,
@@ -313,7 +319,9 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, device, max_steps,
     loss_ema, t0, stop = None, time.time(), False
     print(f"[member {member_idx}] start | {len(train_ds)} train / "
           f"{0 if val_ds is None else len(val_ds)} val windows | {steps_per_epoch} steps/epoch | "
-          f"eval every {eval_every_steps} steps | max {max_steps} steps | patience {patience}")
+          f"eval every {eval_every_steps} steps | max {max_steps} steps | patience {patience} | "
+          f"warmup {warmup_steps} | plateau LRx{lr_factor}@{lr_patience} floor {min_lr_scale} | "
+          f"{'calibrated' if calibrate else 'raw'} judging")
     model.train()
     while step < max_steps and not stop:
         for x, z, m in loader:
@@ -338,19 +346,37 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, device, max_steps,
                       f"loss {loss_ema:.4f} | lr {cur_lr:.2e} | {sps:.1f} it/s | "
                       f"eta {(max_steps - step) / max(1e-9, sps) / 60:.0f}m")
             if step % eval_every_steps == 0 or step >= max_steps:
-                vce = (evaluate_ce(model, val_ds, cfg, device, batch_size, num_workers)
-                       if val_ds else lv)
+                if val_ds is not None and calibrate:
+                    vce, raw_ce, jt = judged_val_ce(model, val_ds, cfg, device, batch_size,
+                                                    num_workers, cal_cap)
+                elif val_ds is not None:
+                    vce, raw_ce, jt = evaluate_ce(model, val_ds, cfg, device, batch_size,
+                                                  num_workers), None, None
+                else:
+                    vce, raw_ce, jt = lv, None, None
                 improved = vce < best_val - 1e-5
                 if improved:
                     best_val = vce
                     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     since_improve = 0
+                    plateau_since_drop = 0
                 else:
                     since_improve += 1
+                    plateau_since_drop += 1
+                    # Defect-1 fix: drop LR on a val plateau; since_improve is NOT reset by a
+                    # drop, so early-stop still terminates at exactly `patience` evals.
+                    if plateau_since_drop >= lr_patience and lr_scale > min_lr_scale:
+                        lr_scale = max(min_lr_scale, lr_scale * lr_factor)
+                        plateau_since_drop = 0
+                        print(f"[member {member_idx}] LR DROP -> {lr * lr_scale:.2e} "
+                              f"(scale {lr_scale:.3f}) after {lr_patience} no-improve evals")
+                raw_str = "" if raw_ce is None else f" | raw {raw_ce:.4f}"
+                t_str = "" if jt is None else f" | T {[round(t, 2) for t in jt]}"
                 base_str = ("" if val_base is None
                             else f" | base {val_base:.4f} {'BEAT' if vce < val_base else 'MISS'}")
                 print(f"[member {member_idx}] EVAL step {step} (ep {step / steps_per_epoch:.2f}) | "
-                      f"val_ce {vce:.4f} | best {best_val:.4f}{base_str} | "
+                      f"val_ce {vce:.4f} | best {best_val:.4f}{raw_str}{t_str}{base_str} | "
+                      f"lr_scale {lr_scale:.3f} | "
                       f"{'IMPROVED' if improved else f'no-improve {since_improve}/{patience}'}")
                 if since_improve >= patience or step >= max_steps:
                     stop = True
@@ -380,6 +406,64 @@ def evaluate_ce(model, ds, cfg, device, batch_size, num_workers=0):
     if was_training:
         model.train()
     return total / count if count else float("inf")
+
+
+@torch.no_grad()
+def judged_val_ce(model, ds, cfg, device, batch_size, num_workers=0, cal_cap=100_000):
+    """Calibration-fair judged val CE (Defect-2 fix). Forwards a bounded, evenly-strided
+    subsample of the val fold, fits a per-horizon temperature on one half by grid search
+    (reusing :func:`v5_loss` per horizon, so the metric cannot drift from the training
+    loss), and scores the calibrated masked loss on the other half -- making the judged
+    number commensurable with the penalty-free :func:`val_marginal_baseline_ce`. The
+    temperatures are TRANSIENT (judging only) and never persisted; ``fit_temperatures`` and
+    the saved checkpoints are untouched. Returns ``(calibrated_ce, raw_ce, temps)``;
+    all-ones temps reproduce ``raw_ce`` (T=1 lies on the grid).
+    """
+    H = len(cfg.horizons)
+    was_training = model.training
+    model.eval()
+    n = len(ds)
+    if n == 0:
+        if was_training:
+            model.train()
+        return float("inf"), float("inf"), [1.0] * H
+    if cal_cap and n > cal_cap:                          # the fold is ticker-ordered, so an
+        ds = Subset(ds, list(range(0, n, max(1, n // cal_cap)))[:cal_cap])  # even stride, not first-N
+    pin = device == "cuda"
+    loader = DataLoader(ds, batch_size=batch_size, num_workers=num_workers, pin_memory=pin)
+    L, Z, M = [], [], []
+    for x, z, m in loader:
+        L.append(model(x.to(device, non_blocking=pin)))
+        Z.append(z.to(device, non_blocking=pin))
+        M.append(m.to(device, non_blocking=pin))
+    if was_training:
+        model.train()
+    logits, z, m = torch.cat(L, 0), torch.cat(Z, 0), torch.cat(M, 0)
+    raw_ce = v5_loss(logits, z, m, cfg).item()
+    parity = torch.arange(logits.shape[0], device=logits.device) % 2   # deterministic half-split
+    fit, score = parity == 0, parity == 1
+    if float(m[fit].sum()) < 1 or float(m[score].sum()) < 1:           # too few labels to calibrate
+        return raw_ce, raw_ce, [1.0] * H
+    grid = torch.linspace(0.5, 5.0, 46)                               # same grid as fit_temperatures
+    lf, zf, mf = logits[fit], z[fit], m[fit]
+    temps, Tvec = [], torch.ones(H, device=logits.device)
+    for h in range(H):
+        if float(mf[:, h].sum()) < 1:
+            temps.append(1.0)
+            continue
+        m_h = torch.zeros_like(mf)
+        m_h[:, h] = mf[:, h]                                          # isolate horizon h via the mask
+        best_T, best = 1.0, float("inf")
+        for T in grid:
+            Tvec[h] = float(T)
+            v = v5_loss(lf / Tvec.view(1, -1, 1), zf, m_h, cfg).item()
+            if v < best:
+                best, best_T = v, float(T)
+        Tvec[h] = 1.0
+        temps.append(best_T)
+    Ts = torch.tensor(temps, device=logits.device)
+    cal_ce = v5_loss(logits[score] / Ts.view(1, -1, 1), z[score], m[score], cfg).item()
+    return cal_ce, raw_ce, temps
 
 
 @torch.no_grad()
@@ -608,13 +692,27 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=None,
                    help="Hard step-budget override; takes precedence over --epochs.")
     p.add_argument("--t-max", type=int, default=None,
-                   help="Cosine-decay horizon in steps; defaults to the step budget.")
+                   help="Logged-only step horizon kept for the --smoke/--t-max paths; the "
+                        "plateau LR schedule no longer reads it.")
     p.add_argument("--eval-every-steps", type=int, default=2000,
                    help="Validate every N optimizer steps. Step-based so the cadence does "
                         "not silently coarsen as the train set grows.")
     p.add_argument("--patience", type=int, default=20,
-                   help="Early-stop after this many evals without improvement "
-                        "(no-improve budget = patience * eval-every-steps).")
+                   help="Early-stop after this many evals without improvement.")
+    p.add_argument("--lr-patience", type=int, default=4,
+                   help="Evals on a val plateau before a multiplicative LR drop.")
+    p.add_argument("--lr-factor", type=float, default=0.5,
+                   help="Multiplicative LR drop applied on each plateau.")
+    p.add_argument("--min-lr-scale", type=float, default=0.04,
+                   help="Floor on the LR scale (LR floor = min-lr-scale * --lr).")
+    p.add_argument("--warmup-steps", type=int, default=1000,
+                   help="Linear LR warm-up length in steps.")
+    p.add_argument("--judge-cal-cap", type=int, default=100_000,
+                   help="Max val rows for the in-loop calibrated judging metric (bounded "
+                        "regardless of --val-subsample).")
+    p.add_argument("--no-calibrate-eval", dest="calibrate_eval", action="store_false",
+                   help="Judge val CE on raw logits (disable in-loop temperature calibration).")
+    p.set_defaults(calibrate_eval=True)
     p.add_argument("--val-subsample", type=int, default=150_000,
                    help="Fixed seeded validation fold size for early-stop and temperature fit.")
     p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
@@ -650,6 +748,7 @@ def main():
         args.window, args.d_model, args.n_blocks = 130, 48, 2
         args.batch_size, args.max_steps, args.t_max = 32, 24, 24
         args.eval_every_steps, args.patience = 8, 2
+        args.lr_patience, args.warmup_steps = 1, 4
         args.eval_days = 40
         args.num_workers, args.log_every = 0, 8
         if args.max_tickers is None:
@@ -762,11 +861,15 @@ def main():
         t_max = args.t_max if args.t_max else max_steps
         eval_every_steps = max(1, args.eval_every_steps)
         val_base = val_marginal_baseline_ce(val_ds, cfg) if val_ds is not None else None
+        if args.patience <= args.lr_patience:
+            print(f"[v5] WARNING: --patience ({args.patience}) <= --lr-patience "
+                  f"({args.lr_patience}); early-stop may fire before the LR anneals.")
         print(f"[v5] schedule | {steps_per_epoch} steps/epoch | budget {max_steps} steps "
-              f"(~{max_steps / steps_per_epoch:.1f} ep) | t_max {t_max} | "
-              f"eval every {eval_every_steps} steps | patience {args.patience} "
-              f"(~{eval_every_steps * args.patience} steps no-improve) | "
-              f"workers {args.num_workers} | members [{start}, {end})")
+              f"(~{max_steps / steps_per_epoch:.1f} ep) | warmup {args.warmup_steps} | "
+              f"plateau LR x{args.lr_factor} after {args.lr_patience} no-improve evals, "
+              f"floor {args.min_lr_scale} | eval every {eval_every_steps} steps | "
+              f"patience {args.patience} | {'calibrated' if args.calibrate_eval else 'raw'} judging "
+              f"(cap {args.judge_cal_cap}) | workers {args.num_workers} | members [{start}, {end})")
         if val_base is not None:
             print(f"[v5] val constant-marginal baseline CE = {val_base:.4f} "
                   f"(model must beat this to be learning anything conditional)")
@@ -775,7 +878,10 @@ def main():
             model, vce = train_member(i, seeds[i], cfg, train_ds, val_ds, args.device,
                                        max_steps, eval_every_steps, args.patience, args.lr,
                                        t_max, args.batch_size, steps_per_epoch,
-                                       args.num_workers, args.log_every, val_base)
+                                       args.num_workers, args.log_every, val_base,
+                                       lr_patience=args.lr_patience, lr_factor=args.lr_factor,
+                                       min_lr_scale=args.min_lr_scale, warmup_steps=args.warmup_steps,
+                                       calibrate=args.calibrate_eval, cal_cap=args.judge_cal_cap)
             model.eval()
             torch.save(model.state_dict(), V5_MODEL_DIR / f"member_{i}.pt")
             members.append(model)
