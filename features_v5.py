@@ -46,6 +46,13 @@ SPIKE_LOG_THRESHOLD = float(np.log(1.5))    # |daily close log-return| above thi
 EWMA_LAMBDA = 0.94                          # RiskMetrics decay for daily variance
 EWMA_SEED_WINDOW = 20                       # rows of non-spike returns to seed the EWMA
 EWMA_SIGMA_FLOOR = 0.005                    # floor on daily sigma_hat (50 bp)
+EWMA_RESEED_GAP_DAYS = 90                   # calendar gap that resets the EWMA seed
+# Calendar-day ceiling on the anchor -> target span per horizon: ceil(1.5*d) + 4.
+# The +4 floor keeps every normal week; a "d-row" label across a longer hole is not
+# a d-day return (halts, recycled symbols) and dies in the mask.
+GAP_LIMIT_DAYS = tuple(int(np.ceil(1.5 * d)) + 4 for d in HORIZON_DAYS)
+PHANTOM_MIN_NAMES = 3                       # census floor below which a session is phantom
+CENSUS_PATH = PROJECT_ROOT / "TrainingData" / "session_census.csv"
 
 
 @dataclass(frozen=True)
@@ -183,17 +190,47 @@ def list_us_tickers(exchanges=US_EXCHANGES, parts_dir=PARTS_DIR):
     return sorted(found)
 
 
+_census_cache = {}
+
+
+def load_session_census(path=CENSUS_PATH):
+    """Phantom-session dates from the committed census: dates whose distinct-name
+    count is below ``PHANTOM_MIN_NAMES``. Returns ``None`` (with a single warning)
+    when the census file is absent, so small dev environments keep working. Any feed
+    append must regenerate the census in the same operation, otherwise new dates
+    would bypass the filter semantics."""
+    key = str(Path(path))
+    if key in _census_cache:
+        return _census_cache[key]
+    p = Path(path)
+    if not p.exists():
+        print(f"[features] WARNING: session census missing at {p}; "
+              "phantom-session filtering disabled")
+        _census_cache[key] = None
+        return None
+    census = pd.read_csv(p, parse_dates=["date"])
+    phantom = census.loc[census["n_names"] < PHANTOM_MIN_NAMES, "date"]
+    _census_cache[key] = set(phantom.dt.normalize())
+    return _census_cache[key]
+
+
 def load_us_ohlcv(tickers=None, exchanges=US_EXCHANGES, parts_dir=PARTS_DIR):
     """Map ticker -> OHLCV frame (``date, open, high, low, close, volume``), sorted.
 
     Rows are filtered to US exchanges (and to ``tickers`` if given) during the parquet
     read so memory stays bounded. Duplicate dates are dropped, keeping the last.
+    Phantom sessions (census-listed dates with fewer than ``PHANTOM_MIN_NAMES``
+    distinct names: pre-1976 holidays, weekend rows, singleton prints) are dropped;
+    dates absent from the census (newer than its end) pass unconditionally.
     """
     raw = _read_parts_filtered(tickers, exchanges, parts_dir)
     if raw.empty:
         return {}
     raw["date"] = pd.to_datetime(raw["date"], errors="coerce").dt.normalize()
     raw = raw.dropna(subset=["date"])
+    phantom = load_session_census(CENSUS_PATH)
+    if phantom:
+        raw = raw[~raw["date"].isin(phantom)]
     for col in ("open", "high", "low", "close", "volume"):
         raw[col] = pd.to_numeric(raw[col], errors="coerce")
     out = {}
@@ -269,8 +306,8 @@ def raw_indicators(df):
 
 # ----------------------------------------------------------------- volatility
 
-def ewma_sigma_hat(close):
-    """Causal RiskMetrics daily volatility with split-spike exclusion.
+def ewma_sigma_hat(close, dates=None, reseed_gap_days=EWMA_RESEED_GAP_DAYS):
+    """Causal RiskMetrics daily volatility with split-spike exclusion and gap re-seed.
 
     Returns ``(sigma_hat, log_return, spike)`` aligned to ``close`` (length N).
 
@@ -280,6 +317,14 @@ def ewma_sigma_hat(close):
     A split-print return (``|r_t| > ln(1.5)``) is excluded from both the seed and the
     update (``sigma2_t = sigma2_{t-1}``), so a single split candle cannot inflate the
     volatility used to normalize weeks of labels. Pre-seed rows are ``NaN``.
+
+    When ``dates`` is given and the calendar gap from the previous row exceeds
+    ``reseed_gap_days``, the seed state resets: the next ``EWMA_SEED_WINDOW``
+    non-spike returns re-seed the variance, the first post-gap return (which spans
+    the halt, not a trading day) is excluded from the new seed, and the pre-re-seed
+    rows carry ``NaN`` so their labels die via the mask's finiteness term. Without
+    the reset, the first post-halt anchors would normalize labels with pre-halt
+    volatility.
     """
     close = np.asarray(close, dtype=np.float64)
     n = close.size
@@ -287,10 +332,18 @@ def ewma_sigma_hat(close):
     log_return[1:] = np.log(close[1:] / close[:-1])
     spike = np.abs(np.nan_to_num(log_return, nan=0.0)) > SPIKE_LOG_THRESHOLD
 
+    gap_reset = np.zeros(n, dtype=bool)
+    if dates is not None:
+        day = np.asarray(dates, dtype="datetime64[ns]").astype("datetime64[D]").astype(np.int64)
+        gap_reset[1:] = (day[1:] - day[:-1]) > reseed_gap_days
+
     sigma_hat = np.full(n, np.nan)
     floor2 = EWMA_SIGMA_FLOOR ** 2
     seed_vals, seed_done, sigma2 = [], False, np.nan
     for t in range(1, n):
+        if gap_reset[t]:
+            seed_vals, seed_done, sigma2 = [], False, np.nan
+            continue                     # the halt-spanning return never enters the seed
         if not np.isfinite(log_return[t]):
             if seed_done:
                 sigma_hat[t] = np.sqrt(max(sigma2, floor2))
@@ -359,6 +412,11 @@ class FeatureFrame:
     ``features`` is ``(N, N_FEATURES)`` unnormalized with ``is_pad`` zeroed; ``z`` is
     ``(N, 4)`` vol-normalized targets (``NaN`` where unavailable); ``spike_free`` and
     ``target_dates`` feed the label mask; ``close`` and ``dates`` index the rows.
+    ``volume`` is the raw print; ``tradable`` is the causal candidate-gate flag
+    (close >= $5 and 63-session rolling median dollar volume >= $1M); ``vol_med63``
+    is the causal 63-session rolling median of raw volume (the split detector's
+    corroboration reference, NaN where unavailable). Computed once here so trainer,
+    live scorer, and backtest cannot drift.
     """
 
     ticker: str
@@ -369,6 +427,9 @@ class FeatureFrame:
     spike_free: np.ndarray
     target_dates: np.ndarray
     sigma_hat: np.ndarray
+    volume: np.ndarray
+    tradable: np.ndarray
+    vol_med63: np.ndarray
 
 
 def build_feature_frame(ticker, ohlcv, fear_greed):
@@ -378,11 +439,17 @@ def build_feature_frame(ticker, ohlcv, fear_greed):
     ind = raw_indicators(df)
     close = df["close"].to_numpy(dtype=np.float64)
     dates = df["date"].to_numpy()
+    volume = df["volume"].to_numpy(dtype=np.float64)
+
+    close_s = pd.Series(close)
+    dollar_med63 = (close_s * pd.Series(volume)).rolling(63, min_periods=63).median()
+    tradable = ((close_s >= 5.0) & (dollar_med63 >= 1e6)).fillna(False).to_numpy(dtype=bool)
+    vol_med63 = pd.Series(volume).rolling(63, min_periods=63).median().to_numpy(dtype=np.float64)
 
     fg_merged = df[["date"]].merge(fear_greed, on="date", how="left")
     fear = fg_merged["fear_greed"].ffill().to_numpy(dtype=np.float64)
 
-    sigma_hat, _, spike = ewma_sigma_hat(close)
+    sigma_hat, _, spike = ewma_sigma_hat(close, dates)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         ch = {
@@ -428,7 +495,8 @@ def build_feature_frame(ticker, ohlcv, fear_greed):
         features[:, j] = ch[name]
 
     z, spike_free, target_dates = _targets(close, dates, sigma_hat, spike)
-    return FeatureFrame(ticker, dates, close, features, z, spike_free, target_dates, sigma_hat)
+    return FeatureFrame(ticker, dates, close, features, z, spike_free, target_dates,
+                        sigma_hat, volume, tradable, vol_med63)
 
 
 def _log_volume_z(volume, window=60):
@@ -440,9 +508,15 @@ def _log_volume_z(volume, window=60):
 def _targets(close, dates, sigma_hat, spike):
     """Vol-normalized forward log-returns, the spike-free flag, and target dates.
 
-    ``z[t, h] = ln(C_{t+d_h} / C_t) / (sigma_hat_t * sqrt(d_h))``; it is ``NaN`` when the
-    horizon runs off the end of the series or ``sigma_hat_t`` is undefined.
-    ``spike_free[t, h]`` is true when no split print falls in ``(t, t+d_h]``.
+    Labels are anchored to next-close entry (the earliest interval a signal computed
+    from close(t) can actually hold): entry index ``t+1``, target index ``t+1+d_h``,
+    ``z[t, h] = ln(C_{t+1+d_h} / C_{t+1}) / (sigma_hat_t * sqrt(d_h))``. The
+    denominator stays causal at the anchor ``t``. ``z`` is ``NaN`` when the horizon
+    runs off the end of the series or ``sigma_hat_t`` is undefined;
+    ``target_dates[t, h] = dates[t+1+d_h]``. ``spike_free[t, h]`` is true when no
+    split print falls in ``(t+1, t+1+d_h]``: a print at ``t+1`` must NOT censor (both
+    entry and target closes sit on the post-split basis, so it cancels out of the
+    ratio), while a print at ``t+1+d_h`` must.
     """
     n = close.size
     h = len(HORIZON_DAYS)
@@ -452,31 +526,47 @@ def _targets(close, dates, sigma_hat, spike):
     cum_spike = np.concatenate([[0], np.cumsum(spike.astype(np.int64))])  # length n+1
     logc = np.log(close)
     for hi, d in enumerate(HORIZON_DAYS):
-        end = np.arange(n) + d
-        valid = end < n
-        idx = np.where(valid)[0]
-        tgt = idx + d
-        y = logc[tgt] - logc[idx]
+        valid = np.arange(n) + 1 + d < n
+        idx = np.where(valid)[0]                  # last valid anchor: n - d - 2
+        entry = idx + 1
+        tgt = idx + 1 + d
+        y = logc[tgt] - logc[entry]
         denom = sigma_hat[idx] * np.sqrt(d)
         with np.errstate(divide="ignore", invalid="ignore"):
             z[idx, hi] = y / denom
         target_dates[idx, hi] = dates[tgt]
-        # spikes strictly after t through t+d: cum_spike[t+d+1] - cum_spike[t+1]
-        spike_free[idx, hi] = (cum_spike[tgt + 1] - cum_spike[idx + 1]) == 0
+        # spikes strictly after t+1 through t+1+d: cum_spike[t+d+2] - cum_spike[t+2]
+        spike_free[idx, hi] = (cum_spike[tgt + 1] - cum_spike[entry + 1]) == 0
     return z.astype(np.float32), spike_free, target_dates
 
 
-def label_mask(spike_free, target_dates, split_end_dates):
-    """Per-horizon training mask: target exists, is spike-free, and lands on or before
-    the row's split boundary (the embargo against labels that peek past the split).
+def label_mask(z, spike_free, target_dates, anchor_dates, split_end_dates,
+               horizon_days=HORIZON_DAYS):
+    """Per-horizon training mask: target exists, z is finite, the label is spike-free,
+    the anchor -> target span fits the horizon's calendar-gap ceiling, and the target
+    lands on or before the row's split boundary (the embargo against labels that peek
+    past the split).
+
+    The finiteness term closes the channel where a NaN label would otherwise train as
+    a full-weight z = 0 target downstream (load-bearing once the EWMA re-seed
+    introduces NaN sigma_hat mid-series). The gap term breaks mask monotonicity by
+    design: a post-anchor halt can kill 1d while 6m survives.
 
     ``split_end_dates`` is the split-end date applicable to each row. The comparison
     ``target_dates <= split_end`` is the single leakage-critical decision and is unit
     tested directly.
     """
     has_future = ~np.isnat(target_dates)
+    finite = np.isfinite(z)
+    anchor_days = np.asarray(anchor_dates, dtype="datetime64[ns]").astype("datetime64[D]")
+    target_days = target_dates.astype("datetime64[D]")
+    gap_limits = np.asarray([int(np.ceil(1.5 * d)) + 4 for d in horizon_days])
+    with np.errstate(invalid="ignore"):
+        span = (target_days.astype(np.int64)
+                - anchor_days.astype(np.int64)[:, None])          # garbage on NaT rows,
+    within_gap = span <= gap_limits[None, :]                      # ANDed out by has_future
     within_split = target_dates <= np.asarray(split_end_dates, dtype="datetime64[ns]")[:, None]
-    return (has_future & spike_free & within_split).astype(np.float32)
+    return (has_future & finite & spike_free & within_gap & within_split).astype(np.float32)
 
 
 # ---------------------------------------------------------------- windowing

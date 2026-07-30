@@ -62,6 +62,7 @@ class V5Config:
     d_mkt: int = 64                 # seam B dim (null until graft)
     d_feed: int = 6                 # seam C dim (null until graft)
     p_cond: float = 0.25            # conditioning-dropout prob during graft training
+    lam_cls: float = 0.1            # 3-class auxiliary loss weight (single source)
     horizons: tuple = (1, 5, 21, 126)
     n_bins: int = 60
     bin_width: float = 0.1348       # histogram bin width on the z-score axis
@@ -309,14 +310,20 @@ def class_marginals(logits, theta_bins, n_bins):
     return torch.stack(cols, 1)
 
 
-def v5_loss(logits, z, mask, cfg: V5Config, lam_cls=0.1):
-    """Masked distributional cross-entropy plus an auxiliary 3-class term.
+def v5_loss_components(logits, z, mask, cfg: V5Config):
+    """Masked loss plus detached per-horizon components.
 
     ``logits`` ``(B, H, n_bins)``; ``z`` ``(B, H)`` carrying ``NaN`` where the label is
     masked; ``mask`` ``(B, H)`` in {0, 1}. Masked targets are replaced by a finite
     placeholder and then excluded with ``torch.where`` rather than multiplied by the
     mask, because ``NaN * 0`` is ``NaN`` and would poison the batch sum.
+
+    Returns ``(loss, per_h)``: the masked scalar loss and a detached ``(H,)`` tensor
+    of per-horizon masked means (NaN-free: horizons with no labels report 0). The
+    label-count-weighted components sum back to the scalar, so the per-horizon view
+    stays mix-unconfounded when train-side thinning changes the horizon composition.
     """
+    lam_cls = cfg.lam_cls
     z = torch.nan_to_num(z, nan=0.0)
     logp = F.log_softmax(logits, -1)
     ce = -(hl_gauss_targets(z, cfg) * logp).sum(-1)
@@ -325,7 +332,16 @@ def v5_loss(logits, z, mask, cfg: V5Config, lam_cls=0.1):
     pm = class_marginals(logits, cfg.theta_bins, cfg.n_bins).clamp_min(1e-8)
     ce3 = F.nll_loss(pm.log().flatten(0, 1), cls.flatten(), reduction="none").view_as(z)
     per = torch.where(mask.bool(), ce + lam_cls * ce3, torch.zeros_like(ce))
-    return per.sum() / mask.sum().clamp_min(1.0)
+    loss = per.sum() / mask.sum().clamp_min(1.0)
+    per_h = (per.sum(0) / mask.sum(0).clamp_min(1.0)).detach()
+    return loss, per_h
+
+
+def v5_loss(logits, z, mask, cfg: V5Config):
+    """Masked distributional cross-entropy plus the ``cfg.lam_cls``-weighted 3-class
+    term (see :func:`v5_loss_components`)."""
+    loss, _ = v5_loss_components(logits, z, mask, cfg)
+    return loss
 
 
 @torch.no_grad()

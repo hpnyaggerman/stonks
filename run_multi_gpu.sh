@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Train a v5 deep ensemble across every visible GPU in parallel — MEMBERS_PER_GPU
-# members per card — then run one finalize pass that writes temperatures, metadata,
+# Train a v5 deep ensemble across every visible GPU in parallel -- MEMBERS_PER_GPU
+# members per card -- then run one finalize pass that writes temperatures, metadata,
 # and forecasts over the full ensemble.
 #
 #   bash run_multi_gpu.sh <members_per_gpu> [extra run_train_v5.py args...]
 #
 # Examples:
 #   bash run_multi_gpu.sh 2                       # 2 members per GPU
-#   bash run_multi_gpu.sh 2 --seed 7 --batch-size 512 --lr 4.2e-4 \
-#       --max-steps 100000 --t-max 100000        # extra args apply to every process
+#   bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 \
+#       --seed 7 --batch-size 512                # extra args apply to every process
 #
 # GPUs: all that nvidia-smi reports, or the set in CUDA_VISIBLE_DEVICES if you export
 # it before calling. Total members = (#GPUs) * members_per_gpu.
 #
-# Do NOT pass these via the extra args — the script manages them:
+# Do NOT pass these via the extra args -- the script manages them:
 #   --members --member-start --member-count --cache-dir --skip-forecast --forecast-only --device
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -36,13 +36,18 @@ NGPU=${#GPU_IDS[@]}
 MEMBERS=$(( NGPU * PER_GPU ))
 
 export PYTHONUNBUFFERED=1   # unbuffered so per-GPU logs stream live, not in 8 KB chunks
+# One nonce per launch: the member-0 trainer embeds it in the run manifest and every
+# other trainer requires an exact match, so a stale manifest from a previous launch
+# can never pass the reader check.
+export RUN_NONCE="$(date +%s)-$$"
 # Shared across every process so the scaler / splits / val-fold are identical and the
-# ensemble is valid. Override anything here by appending to the script's extra args.
-COMMON=(--members "$MEMBERS" --eval-mode time --seed 42 --batch-size 256 --num-workers 8
-        --epochs 3 --eval-every-steps 2000 --patience 20 --val-subsample 150000
+# ensemble is valid. Eval cadence is the trainer's built-in schedule (no fixed
+# --eval-every-steps); eval mode comes from the caller's extra args.
+COMMON=(--members "$MEMBERS" --seed 42 --batch-size 256 --num-workers 8
+        --epochs 3 --patience 20 --val-subsample 150000
         --log-every 100 --device cuda)
 
-echo "[multi-gpu] GPUs=${GPU_IDS[*]} | members/GPU=$PER_GPU | total members=$MEMBERS"
+echo "[multi-gpu] GPUs=${GPU_IDS[*]} | members/GPU=$PER_GPU | total members=$MEMBERS | nonce=$RUN_NONCE"
 echo "[multi-gpu] args: ${COMMON[*]} ${EXTRA[*]+${EXTRA[*]}}"
 
 pids=()
@@ -67,6 +72,18 @@ for g in "${!pids[@]}"; do
 done
 [ "$fail" -eq 0 ] || { echo "[multi-gpu] a trainer failed; skipping finalize" >&2; exit 1; }
 
+# Finalize reuses GPU0's cache dir (the memmap opens mode=w+, an in-place overwrite,
+# not a fast reuse) and deletes the other per-GPU copies first -- they are identical
+# by construction, and the deletion is what actually frees the disk the crashed
+# run-2 finalize ran out of.
+for g in "${!GPU_IDS[@]}"; do
+    if [ "$g" -ne 0 ]; then
+        rm -rf "cache/v5_gpu${g}"
+    fi
+done
 echo "[multi-gpu] all $MEMBERS members trained; finalizing (temperatures + artifacts + forecasts)"
-python run_train_v5.py "${COMMON[@]}" ${EXTRA[@]+"${EXTRA[@]}"} --forecast-only 2>&1 | tee finalize.log
+FINALIZE_CMD=(python run_train_v5.py "${COMMON[@]}" ${EXTRA[@]+"${EXTRA[@]}"} \
+    --cache-dir cache/v5_gpu0 --forecast-only)
+echo "[multi-gpu] finalize command: ${FINALIZE_CMD[*]}" | tee finalize.log
+"${FINALIZE_CMD[@]}" 2>&1 | tee -a finalize.log
 echo "[multi-gpu] done"

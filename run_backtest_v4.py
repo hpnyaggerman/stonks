@@ -1,3 +1,6 @@
+# v4-LEGACY: serves the run_forecast_v4.ipynb line only. The v5 pipeline is
+# backtested by run_backtest_v5.py (gap-aware split detection, t+1 fills, forced
+# delisting exits, cost grid); this script's accounting is superseded there.
 import os
 import sys
 import json

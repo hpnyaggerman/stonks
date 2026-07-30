@@ -35,14 +35,27 @@ def histogram_quantiles(hist, bin_width, n_bins, levels=QUANTILE_LEVELS):
 
 def build_forecast_columns(dates, close, sigma_hat, horizon_days,
                            up, up_std, down, neutral, score, score_std,
-                           hist, bin_width, n_bins):
+                           hist, bin_width, n_bins,
+                           volume=None, tradable=None, vol_med63=None):
     """Assemble the per-row forecast columns for one ticker.
 
     Probabilities come straight from the ensemble three-class marginals; quantiles are
     histogram z-quantiles rescaled to raw-return units by ``sigma_hat * sqrt(d_h)``.
     All array inputs are indexed ``[row, horizon]`` (except ``hist`` ``[row, horizon, bin]``).
+
+    ``volume`` / ``tradable`` / ``vol_med63`` (per-row, additive) transport the raw
+    print volume, the causal candidate-gate flag, and the causal 63-session volume
+    median cross-stage: the backtest's split-detector corroboration and candidate
+    gate cannot compute them from the OOS-only CSVs (a 63-session trailing statistic
+    is undefined for each ticker's first 62 OOS sessions).
     """
     cols = {"Date": dates, "Close": close}
+    if volume is not None:
+        cols["Volume"] = volume
+    if tradable is not None:
+        cols["Tradable"] = np.asarray(tradable).astype(np.int64)
+    if vol_med63 is not None:
+        cols["VolMed63"] = vol_med63
     qz = histogram_quantiles(hist, bin_width, n_bins)             # (rows, H, 3)
     for hi, (label, d) in enumerate(zip(HORIZON_LABELS, horizon_days)):
         scale = sigma_hat * np.sqrt(d)
