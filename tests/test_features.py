@@ -343,3 +343,79 @@ def test_calendar_bounds():
     for name, arr in ch.items():
         assert np.all(arr >= -1.0001) and np.all(arr <= 1.0001), name
     assert np.isclose(ch["sin_week"][0], 0.0) and np.isclose(ch["cos_week"][0], 1.0)
+
+
+def test_rolling_close_z_matches_direct_formula():
+    """Per-window zscore equals the direct two-pass formula on every valid row and
+    keeps the declared 19-row NaN warm-up."""
+    rng = np.random.default_rng(3)
+    close = 100 * np.exp(np.cumsum(0.02 * rng.standard_normal(300)))
+    z = fx._rolling_close_z(close)
+    assert np.isnan(z[:19]).all() and np.isfinite(z[19:]).all()
+    for i in (19, 57, 150, 299):
+        win = close[i - 19: i + 1]
+        want = (close[i] - win.mean()) / win.std(ddof=1)
+        assert abs(z[i] - want) < 1e-10, (i, z[i], want)
+
+
+def test_rolling_close_z_constant_window_zero():
+    """Bit-constant windows are the structural 0/0 and emit exactly 0; windows
+    straddling the level change stay finite and Samuelson-bounded."""
+    close = np.concatenate([np.full(60, 4.938), [5.375, 5.438], np.full(41, 5.438)])
+    z = fx._rolling_close_z(close)
+    assert (z[19:60] == 0.0).all()
+    assert (z[81:] == 0.0).all()
+    fin = z[np.isfinite(z)]
+    assert np.abs(fin).max() <= 19 / np.sqrt(20) + 1e-9
+
+
+def test_rolling_close_z_bounded_fp16_safe_adversarial():
+    """The Samuelson bound (w-1)/sqrt(w) holds on adversarial series -- huge price
+    levels with ulp-scale jitter, near-flat feed jitter, violent walks, level
+    steps -- so the fp16 cast can never overflow."""
+    rng = np.random.default_rng(4)
+    cases = [
+        np.full(120, 631_000.10) + rng.choice([0.0, 1e-6], size=120),
+        5.75 + rng.choice([0.0, 0.01, -0.01], size=200),
+        100 * np.exp(np.cumsum(0.05 * rng.standard_normal(400))),
+        np.concatenate([np.full(30, 2.0), np.full(30, 900_000.0)]),
+    ]
+    for k, close in enumerate(cases):
+        z = fx._rolling_close_z(np.asarray(close, dtype=np.float64))
+        fin = z[np.isfinite(z)]
+        assert fin.size, k
+        assert np.abs(fin).max() <= 19 / np.sqrt(20) + 1e-9, (k, np.abs(fin).max())
+        assert np.isfinite(fin.astype(np.float16)).all(), k
+
+
+def test_zscore_channel_fp16_safe_through_builder():
+    """A flat-stretch ticker (the incident class) builds a zscore channel that
+    survives the fp16 round-trip finite, with fully-inside-stretch windows at 0."""
+    oh = _synthetic_ohlcv(n=300, seed=7)
+    oh.loc[100:160, "close"] = 5.83
+    fear = pd.DataFrame({"date": oh["date"], "fear_greed": 50.0})
+    frame = fx.build_feature_frame("SYN", oh, fear)
+    j = fx.FEATURE_NAMES.index("zscore")
+    zs = frame.features[:, j]
+    fin = zs[np.isfinite(zs)]
+    assert np.isfinite(fin.astype(np.float16)).all()
+    assert np.abs(fin).max() <= 19 / np.sqrt(20) + 1e-6
+    assert (zs[119:161] == 0.0).all()
+
+
+def test_transform_rejects_fp16_overflow_on_unscaled():
+    """The fp16 finiteness guard refuses finite float32 magnitudes beyond the fp16
+    range in unscaled channels; scaled channels are clip-protected and pass."""
+    rows = np.zeros((8, fx.N_FEATURES), dtype=np.float32)
+    scaler = fx.RobustScaler.fit(np.random.default_rng(0).standard_normal((64, fx.N_FEATURES)))
+    scaler.transform(rows)
+    bad = rows.copy()
+    bad[3, fx.FEATURE_NAMES.index("zscore")] = 1e8
+    try:
+        scaler.transform(bad)
+        assert False, "expected ValueError for fp16 overflow"
+    except ValueError as e:
+        assert "zscore" in str(e)
+    clipped = rows.copy()
+    clipped[2, fx.SCALED_IDX[0]] = 1e8
+    scaler.transform(clipped)

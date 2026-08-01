@@ -242,12 +242,45 @@ def load_us_ohlcv(tickers=None, exchanges=US_EXCHANGES, parts_dir=PARTS_DIR):
 
 # ------------------------------------------------------------- raw indicators
 
+def _rolling_close_z(close, window=20):
+    """Z-score of close against its own trailing ``window`` values, computed
+    independently per window (two-pass mean / sum of squared deviations on the raw
+    slice).
+
+    Pandas' rolling kernel carries a running accumulator across window steps whose
+    drift can report an exactly-zero std on windows with real spread; dividing by
+    the historical 1e-10 floor then manufactured |z| ~ 1e9, which the fp16 memmap
+    cast overflowed to +-inf. Per-window computation has no cross-window state, so
+    that artifact class cannot occur. Because the current close is a member of its
+    own window, Samuelson's inequality bounds the true value at
+    ``(window - 1) / sqrt(window)`` (~4.25 for window 20), fp16-safe by theorem.
+    Bit-constant windows are the structural 0/0 (numerator exactly zero) and emit
+    the unique deviation-free value 0. Leading ``window - 1`` rows are NaN, the
+    warm-up the channel spec declares.
+    """
+    close = np.asarray(close, dtype=np.float64)
+    n = close.shape[0]
+    z = np.full(n, np.nan)
+    if n < window:
+        return z
+    win = np.lib.stride_tricks.sliding_window_view(close, window)
+    m = win.mean(axis=1)
+    s = np.sqrt(((win - m[:, None]) ** 2).sum(axis=1) / (window - 1))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        zz = (close[window - 1:] - m) / s
+    zz[win.max(axis=1) == win.min(axis=1)] = 0.0
+    z[window - 1:] = zz
+    return z
+
+
 def raw_indicators(df):
     """Recompute the price-derived indicator suite from OHLCV.
 
     Column names and formulas match the pipeline's historical preprocessing output
-    so the two can be compared value-for-value. ``df`` must have a clean integer index
-    and columns ``date, open, high, low, close, volume``.
+    so the two can be compared value-for-value, with one deliberate deviation:
+    ``ZScore`` comes from :func:`_rolling_close_z` and differs from the legacy
+    rolling kernel exactly where that kernel's std degenerates. ``df`` must have a
+    clean integer index and columns ``date, open, high, low, close, volume``.
     """
     df = df.sort_values("date").reset_index(drop=True).copy()
     out = pd.DataFrame({"date": df["date"], "close": df["close"]})
@@ -287,9 +320,7 @@ def raw_indicators(df):
     out["Volatility_20"] = df["close"].pct_change().rolling(20).std()
     out["Volatility_30"] = df["close"].pct_change().rolling(30).std()
 
-    mean20 = df["close"].rolling(20).mean()
-    cstd20 = df["close"].rolling(20).std().replace(0, np.nan).fillna(1e-10)
-    out["ZScore"] = (df["close"] - mean20) / cstd20
+    out["ZScore"] = _rolling_close_z(df["close"].to_numpy(dtype=np.float64))
 
     out["overnight_gap"] = (df["open"] - df["close"].shift(1)) / df["close"].shift(1)
     rolling_vol = df["volume"].rolling(20)
@@ -494,6 +525,15 @@ def build_feature_frame(ticker, ohlcv, fear_greed):
     for j, name in enumerate(FEATURE_NAMES):
         features[:, j] = ch[name]
 
+    # zscore is unscaled and skips the robust-z clip; the per-window computation is
+    # Samuelson-bounded at (w-1)/sqrt(w) ~ 4.25, so anything larger means the exact
+    # builder regressed toward the fp16-overflow class.
+    zs = ch["zscore"]
+    zs = zs[np.isfinite(zs)]
+    if zs.size and float(np.max(np.abs(zs))) > 5.0:
+        raise ValueError(f"{ticker}: |zscore| max {np.max(np.abs(zs)):.3g} exceeds "
+                         "the Samuelson bound for a same-window z-score")
+
     z, spike_free, target_dates = _targets(close, dates, sigma_hat, spike)
     return FeatureFrame(ticker, dates, close, features, z, spike_free, target_dates,
                         sigma_hat, volume, tradable, vol_med63)
@@ -653,7 +693,16 @@ class RobustScaler:
             out[:, j] = (out[:, j] - self.medians[j]) / self.scales[j]
             np.clip(out[:, j], -10.0, 10.0, out=out[:, j])
         out = np.nan_to_num(out, nan=0.0)
-        return out.astype(np.float16).astype(np.float32)
+        out16 = out.astype(np.float16)
+        # Inputs are finite here (scrubbed above), so a nonfinite fp16 value is a
+        # finite float32 beyond the fp16 range (65504) on an unscaled channel --
+        # refuse to emit a poisoned row rather than let training consume it.
+        bad = ~np.isfinite(out16)
+        if bad.any():
+            names = sorted({FEATURE_NAMES[j] for j in np.nonzero(bad)[1]})
+            raise ValueError(f"fp16 overflow in channel(s) {names}: "
+                             f"{int(bad.sum())} values exceed the fp16 range")
+        return out16.astype(np.float32)
 
     def to_dict(self):
         return {
