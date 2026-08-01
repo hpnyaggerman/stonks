@@ -1418,7 +1418,7 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
         row = {"step": step, "smoothed_score": smoothed, "improved": bool(improved),
                "bootstrap": bool(bootstrap)}
         for k, v in res.items():
-            if k in ("ic_records", "ic_records_tag1", "top_records"):
+            if k in ("ic_records", "ic_records_tag1", "panel_records", "top_records"):
                 continue
             if k == "judged_T":
                 for hl, tv in zip(HORIZON_LABELS, v):
@@ -1432,7 +1432,8 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
         row["ce_excess"] = (float(min(ce_at_eval[-lr_patience:]) - best_ce)
                             if len(ce_at_eval) >= lr_patience else None)
         eval_rows.append(row)
-        for tag, key in ((0, "ic_records"), (1, "ic_records_tag1")):
+        for tag, key in ((0, "ic_records"), (1, "ic_records_tag1"),
+                         (2, "panel_records")):
             for r in res.get(key) or ():
                 ic_rows.append({"step": step, "tag": tag, **r})
         for r in res.get("top_records") or ():
