@@ -157,3 +157,47 @@ def test_forecast_column_builder_transport():
                                   vol_med63=np.full(rows, 5.0))
     assert list(full["Tradable"]) == [1, 0, 1]
     assert "Volume" in full and "VolMed63" in full
+
+
+def test_promote_run_copies_stamps_and_refuses():
+    """Promotion copies the artifact set, member checkpoints, and forecast files
+    into the served dirs, stamps promoted_from.json, and refuses unfinished runs."""
+    import tempfile
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import promote_run as pr
+
+    base = tempfile.mkdtemp()
+    run_dir = os.path.join(base, "runs", "r1")
+    os.makedirs(run_dir)
+    for name, payload in (("v5_meta.json", {"members": 1}),
+                          ("v5_norm.json", {"channels": []}),
+                          ("config.json", {"d_model": 8}),
+                          ("run_manifest.json", {"args": {"members": 1},
+                                                 "git_revision": "abc",
+                                                 "run_nonce": "n-1"})):
+        with open(os.path.join(run_dir, name), "w") as f:
+            json.dump(payload, f)
+    torch.save({"w": torch.zeros(2)}, os.path.join(run_dir, "member_0.pt"))
+    fc_root = os.path.join(base, "forecasts")
+    os.makedirs(os.path.join(fc_root, "r1"))
+    for name in ("AAA_forecast.csv", "split_info.json"):
+        with open(os.path.join(fc_root, "r1", name), "w") as f:
+            f.write("x")
+    model_dir = os.path.join(base, "served")
+
+    stamp = pr.promote(run_dir, model_dir=model_dir, forecast_dir=fc_root)
+    for name in ("v5_meta.json", "v5_norm.json", "config.json", "run_manifest.json",
+                 "member_0.pt", "promoted_from.json"):
+        assert os.path.exists(os.path.join(model_dir, name)), name
+    assert os.path.exists(os.path.join(fc_root, "AAA_forecast.csv"))
+    assert os.path.exists(os.path.join(fc_root, "split_info.json"))
+    assert stamp["run_dir"].endswith("r1") and stamp["run_nonce"] == "n-1"
+    assert stamp["members"] == 1 and stamp["forecast_files"] == 2
+
+    unfinished = os.path.join(base, "runs", "r2")
+    os.makedirs(unfinished)
+    try:
+        pr.promote(unfinished, model_dir=model_dir, forecast_dir=fc_root)
+        assert False, "expected SystemExit for unfinished run"
+    except SystemExit:
+        pass

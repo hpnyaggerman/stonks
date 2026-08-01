@@ -48,10 +48,10 @@ prints the rolling-origin `--data-end` values (phantom-filtered sessions exactly
 
 ## 2. Null-control run (gates the metric machinery, not the model)
 
-One member trained on within-date-shuffled train labels; its finalize is kept because the gate read needs the null run's temperatures. Dedicated run dir is mandatory (default would overwrite `models/v5`):
+One member trained on within-date-shuffled train labels; its finalize is kept because the gate read needs the null run's temperatures. A dedicated, named run dir is mandatory (a bare invocation would claim an anonymous numbered dir; the protocol addresses this run by name):
 
-    python3 run_train_v5.py --members 1 --label-shuffle-within-date --max-steps 40000 --run-dir models/v5_nullc --cache-dir cache/v5_nullc
-    python3 tools/score_checkpoints.py --run-dir models/v5_nullc --members 0 --ensemble --population gating
+    python3 run_train_v5.py --members 1 --label-shuffle-within-date --max-steps 40000 --run-dir models/v5/runs/nullc --cache-dir cache/v5_nullc
+    python3 tools/score_checkpoints.py --run-dir models/v5/runs/nullc --members 0 --ensemble --population gating
 
 A single-process 1-member run trains and finalizes in one invocation (the member range covers the whole ensemble), so the null run's `v5_meta.json` temperatures exist for the gate read without a separate `--forecast-only` pass.
 
@@ -61,17 +61,21 @@ PASS iff the gating-block ICs are ~0 with |t| < 2 across horizons and scores; a 
 
     bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1
 
-One member per GPU (4 total), batch 256, lr 3e-4, warmup 1000, patience 20 evals, `--val-subsample 150000`, scheduled eval cadence (every 250 steps to 2k, 1000 to 30k, 5000 after). The script exports one `RUN_NONCE` per launch; the member-0 process writes `models/v5/run_manifest.json` (args, git revision, data fingerprint, scaler rows) and the other trainers refuse to run against a stale or mismatched manifest. After all members finish it deletes the duplicate per-GPU caches, reuses `cache/v5_gpu0`, and finalizes; the finalize refuses if the data, git revision, or any split-relevant arg changed since training.
+Runs live side by side under `models/v5/runs/` and are never overwritten: the launch claims the next numbered `models/v5/runs/rN` (number gaps mark discarded runs) and passes it to every process; `--run-dir` names a run explicitly instead. The launcher tees its own stream into `<run dir>/run.log`, so a detached launch (`screen -dmS v5run bash run_multi_gpu.sh ...`) needs no external redirect and the run dir is self-contained: config, manifest, per-member train/eval histories, checkpoints, and logs together.
 
-The finalize fits per-horizon temperatures on the tag-0 {1d, 1w} stopping-side labels (1m/6m always persist T = 1.0), computes the per-horizon live score floors (p95 of the tempered ensemble Score over tradability-filtered tag-0 stopping-block-anchor samples), runs the parity check, and writes: `models/v5/{v5_meta.json, v5_norm.json, config.json, member_*.pt, eval_history_member*.jsonl}` and `forecasts/{*_forecast.csv, split_info.json, oos_start_date.txt, surface_manifest.json}`.
+One member per GPU (4 total), batch 256, lr 3e-4, warmup 1000, patience 20 evals, `--val-subsample 150000`, scheduled eval cadence (every 250 steps to 2k, 1000 to 30k, 5000 after). The script exports one `RUN_NONCE` per launch; the member-0 process writes the run dir's `run_manifest.json` (args, git revision, data fingerprint, scaler rows) and the other trainers refuse to run against a stale or mismatched manifest. During training each member appends `train_history_member{i}.jsonl` (per `--log-every` step: lr, loss EMA, per-horizon EMAs, throughput) beside `eval_history_member{i}.jsonl`, and writes `member_{i}_latest.pt` at every eval plus `member_{i}_best.pt` on improvement, so a crash never loses a run's state again. After all members finish the script deletes the duplicate per-GPU caches, reuses `cache/v5_gpu0`, and finalizes; the finalize refuses if the data, git revision, or any split-relevant arg changed since training.
+
+The finalize fits per-horizon temperatures on the tag-0 {1d, 1w} stopping-side labels (1m/6m always persist T = 1.0), computes the per-horizon live score floors (p95 of the tempered ensemble Score over tradability-filtered tag-0 stopping-block-anchor samples), runs the parity check, and writes into the run dir: `v5_meta.json, v5_norm.json, config.json, member_*.pt` plus `forecasts/rN/{*_forecast.csv, split_info.json, oos_start_date.txt, surface_manifest.json}`.
+
+Consumers never read `runs/`. After the gate reads (section 5), promote the chosen run into the served home -- `python3 tools/promote_run.py --run-dir models/v5/runs/rN` copies the artifact set and `member_*.pt` into `models/v5/`, mirrors `forecasts/rN/` into `forecasts/`, and stamps `models/v5/promoted_from.json` with the source run, nonce, git revisions, and time. `run_live_signals_v5.py`, `run_backtest_v5.py`, and the default scorer read the promoted copies.
 
 ## 4. Rolling-origin runs (unconditional -- they are the adjudicating dataset)
 
 Same args plus a data-end and a dedicated run dir per k; run regardless of the primary outcome:
 
-    bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 --data-end 2025-06-03 --run-dir models/v5_ro1
-    bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 --data-end 2024-05-28 --run-dir models/v5_ro2
-    bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 --data-end 2023-05-23 --run-dir models/v5_ro3
+    bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 --data-end 2025-06-03 --run-dir models/v5/runs/ro1
+    bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 --data-end 2024-05-28 --run-dir models/v5/runs/ro2
+    bash run_multi_gpu.sh 1 --eval-mode both --ticker-holdout-frac 0.1 --data-end 2023-05-23 --run-dir models/v5/runs/ro3
 
 `--data-end` truncates every ticker's OHLCV BEFORE the feature build, so labels, sigma, and features are computed as if the feed ended then. Distinct `--run-dir`s are mandatory: each run's scaler differs, and artifacts would clobber each other. Non-default run dirs get their own forecast dirs (`forecasts/<run-dir-basename>/`).
 
@@ -79,14 +83,16 @@ Same args plus a data-end and a dedicated run dir per k; run regardless of the p
 
 Per run, score the finalize ensemble (the gating object; tempered) on the gating blocks and append the results to `docs/v5_gate_ledger.md`:
 
-    python3 tools/score_checkpoints.py --run-dir models/v5 --ensemble --population gating --out models/v5/gate_read.json
+    python3 tools/score_checkpoints.py --run-dir models/v5/runs/rN --ensemble --population gating --out models/v5/runs/rN/gate_read.json
 
-Repeat with `--run-dir models/v5_ro{1,2,3}`. The output carries the tradability-filtered ICs, the top-of-ranking confirmation (including the return-units variant the 1d cost gate consumes), and the uncensored-outcome sensitivity. Decision gates are P6.3 of the plan: 1w/1m carry the standard 3-sigma gates, 1d is cost-conditioned only, 6m is report-only, and any qualifying result must persist at the +-2-eval neighbors of the selected checkpoint (read from the eval history, zero extra gating looks).
+Repeat with `--run-dir models/v5/runs/ro{1,2,3}`. The output carries the tradability-filtered ICs, the top-of-ranking confirmation (including the return-units variant the 1d cost gate consumes), and the uncensored-outcome sensitivity. Decision gates are P6.3 of the plan: 1w/1m carry the standard 3-sigma gates, 1d is cost-conditioned only, 6m is report-only, and any qualifying result must persist at the +-2-eval neighbors of the selected checkpoint (read from the eval history, zero extra gating looks).
 
 Design freeze, once per freeze, after the gates:
 
-    python3 run_train_v5.py <primary args> --forecast-only --design-freeze
-    python3 tools/score_checkpoints.py --run-dir models/v5 --ensemble --population oos --design-freeze
+    python3 run_train_v5.py <primary args incl. --run-dir models/v5/runs/rN> --forecast-only --design-freeze
+    python3 tools/score_checkpoints.py --run-dir models/v5/runs/rN --ensemble --population oos --design-freeze
+
+(`--run-dir` must name the primary run explicitly here -- a bare invocation would claim a fresh empty numbered dir.)
 
 The OOS population refuses to run without `--design-freeze` and prints a one-shot warning; the pooled success verdict is additionally reported on the three rolling years alone (the primary val year is design-contaminated).
 
@@ -113,6 +119,8 @@ Targets: labels are cross-sectionally centered per (session, horizon) -- the tra
 Trainer (`run_train_v5.py`): 1m/6m train labels are thinned (strides 4/25) to slow the long-horizon memorization clock; early stopping now runs on the smoothed rank-IC stopping score (t_1d + t_1w)/sqrt(2) over stopping blocks of the val year, with a calibrated-CE bootstrap while the score is degenerate; evals follow a step schedule dense inside warmup; every eval appends the full metric suite (both scores, block roles, tradability and uncensored variants, train-panel ICs) to a per-member history file, with gating-side values never printed or consulted; the judged CE, its baseline, and the temperature fit all live on one row set (tag-0 {1d, 1w} stopping-side labels under interval membership); `eval_mode=both` now routes eval tickers' val rows into the val fold (tag 1) and non-eval OOS rows onto the forecast surface (full universe); the class-rate probe measures the actually-trained population; sub-$1 anchors never train; `lam_cls` lives on the config; per-horizon train-CE EMAs print in the step log.
 
 Provenance: every run writes `run_manifest.json` (args, git revision, data fingerprint incl. census sha256, scaler rows); multi-GPU launches are nonce-checked; `--forecast-only` refuses on any data/revision/arg drift. `--run-dir` isolates concurrent undertakings; `--data-start/--data-end` enable rolling origins and the survivorship ablation; `--label-shuffle-within-date` is the end-to-end leakage null; a disk preflight replaces the mid-write Bus error.
+
+Run handling (stock-identity convention): runs are numbered side-by-side dirs under `models/v5/runs/` claimed at launch (`rN`, or a protocol name via `--run-dir`), each self-contained -- `run_manifest.json`, `config.json`, per-member `train_history_member{i}.jsonl` + `eval_history_member{i}.jsonl`, `member_{i}_latest.pt` every eval + `member_{i}_best.pt` on improvement + final `member_{i}.pt`, and the launch/trainer/finalize logs. Consumers read only the promoted `models/v5` (`tools/promote_run.py`, stamped by `promoted_from.json`).
 
 Finalize: temperatures are fit from an fp16 logit cache in 100k-row chunks (the float32 materialization killed the run-2 finalize); 1m/6m always persist T = 1.0; per-horizon Score floors are computed inside every finalize and shipped in `v5_meta.json`; the parity number is persisted; forecast CSVs gain `Volume`/`Tradable`/`VolMed63` and include every eval anchor (labels are not needed to forecast); `surface_manifest.json` tags holdout vs time-only tickers.
 

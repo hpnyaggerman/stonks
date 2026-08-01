@@ -50,6 +50,7 @@ from v5.forecast import HORIZON_LABELS, build_forecast_columns
 PROJECT_ROOT = Path(__file__).resolve().parent
 MODELS_DIR = PROJECT_ROOT / "models"
 V5_MODEL_DIR = MODELS_DIR / "v5"
+RUNS_DIR = V5_MODEL_DIR / "runs"
 FORECAST_DIR = PROJECT_ROOT / "forecasts"
 CACHE_DIR = PROJECT_ROOT / "cache" / "v5"
 CLASS_NAMES = ("down", "neutral", "up")
@@ -716,6 +717,27 @@ def _jsonable_args(args):
     return out
 
 
+def next_run_dir(root=RUNS_DIR):
+    """Claim the next numbered run directory (r1, r2, ...) under ``root``.
+
+    Numbered side-by-side run dirs are the chronology: a run never overwrites a
+    previous one, and number gaps mark discarded runs. The mkdir is the claim, so
+    two simultaneous launches cannot resolve to the same number; protocol runs
+    (nullc, ro1..ro3) and smoke pass an explicit --run-dir instead.
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    taken = [int(p.name[1:]) for p in root.glob("r[0-9]*") if p.name[1:].isdigit()]
+    n = max(taken, default=0) + 1
+    while True:
+        cand = root / f"r{n}"
+        try:
+            cand.mkdir()
+            return cand
+        except FileExistsError:
+            n += 1
+
+
 def write_run_manifest(args, run_dir):
     """Written only by the ``--member-start 0`` process, immediately after argument
     resolution (post --smoke mutation, so recorded values are effective), via
@@ -1234,6 +1256,8 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
         m_stop, stop_rows = None, None
     history_path = Path(run_dir) / f"eval_history_member{member_idx}.jsonl"
     history_f = open(history_path, "w", encoding="utf-8")
+    train_history_path = Path(run_dir) / f"train_history_member{member_idx}.jsonl"
+    train_f = open(train_history_path, "w", encoding="utf-8")
 
     pin = device == "cuda"
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False,
@@ -1291,6 +1315,12 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
                 plateau_since_drop = 0
                 print(f"[member {member_idx}] LR DROP -> {lr * lr_scale:.2e} "
                       f"(scale {lr_scale:.3f}) after {lr_patience} no-improve evals")
+        # Crash durability (run-2's finalize died with every member state only in
+        # RAM): latest at each eval, best on improvement. The final member_{i}.pt
+        # written after training (best state) remains the loader contract.
+        torch.save(model.state_dict(), Path(run_dir) / f"member_{member_idx}_latest.pt")
+        if improved:
+            torch.save(best_state, Path(run_dir) / f"member_{member_idx}_best.pt")
         base_str = ("" if base_stop is None else
                     f" | base {base_stop:.4f} "
                     f"{'BEAT' if res['cal_ce_stop'] < base_stop else 'MISS'}")
@@ -1342,6 +1372,13 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
                 print(f"[member {member_idx}] step {step}/{max_steps} (ep {step / steps_per_epoch:.2f}) | "
                       f"loss {loss_ema:.4f} [{per_h_str}] | lr {cur_lr:.2e} | {sps:.1f} it/s | "
                       f"eta {(max_steps - step) / max(1e-9, sps) / 60:.0f}m")
+                train_f.write(json.dumps(
+                    {"step": step, "lr": cur_lr, "loss_ema": loss_ema,
+                     "per_h_ema": {HORIZON_LABELS[hi]: per_h_ema[hi]
+                                   for hi in range(len(cfg.horizons))},
+                     "it_s": sps, "elapsed_s": time.time() - t0_time},
+                    default=float) + "\n")
+                train_f.flush()
             eval_now = (step % eval_every_steps == 0) if eval_every_steps else eval_due(step)
             if (eval_now or step >= max_steps) and have_val:
                 run_eval()
@@ -1352,6 +1389,7 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
                 stop = True
                 break
     history_f.close()
+    train_f.close()
     if best_state is not None:
         model.load_state_dict(best_state)
     crit = f"score {best_score:+.3f}" if np.isfinite(best_score) else f"cal CE {best_ce:.4f}"
@@ -1663,10 +1701,12 @@ def parse_args():
                    help="Truncate every ticker's OHLCV before the feature build, so "
                         "labels/sigma/features are computed as if the feed ended then "
                         "(the rolling-origin prerequisite).")
-    p.add_argument("--run-dir", default=str(V5_MODEL_DIR),
-                   help="Model/artifact directory for this run; rolling-origin runs "
-                        "must use distinct dirs so finalizes do not clobber each "
-                        "other's scaler and metadata.")
+    p.add_argument("--run-dir", default=None,
+                   help="Run directory; default claims the next numbered "
+                        "models/v5/runs/rN. Protocol runs pass explicit dirs "
+                        "(models/v5/runs/{nullc,ro1,ro2,ro3}) so finalizes never "
+                        "clobber each other's scaler and metadata; consumers read "
+                        "the promoted copies in models/v5 (tools/promote_run.py).")
     p.add_argument("--epochs", type=float, default=3.0,
                    help="Training budget in epochs (one pass over the train windows). The "
                         "step budget is derived from this so it auto-scales with the data.")
@@ -1745,6 +1785,9 @@ def main():
         if args.max_forecast_rows is None:
             args.max_forecast_rows = 90
 
+    if args.run_dir is None:
+        args.run_dir = str(next_run_dir().relative_to(PROJECT_ROOT))
+        print(f"[v5] claimed run dir {args.run_dir}")
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     # Non-default run dirs keep separate forecast dirs so rolling-origin runs do not

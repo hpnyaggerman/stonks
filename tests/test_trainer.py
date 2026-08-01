@@ -464,7 +464,7 @@ def test_train_member_bootstrap_selects_checkpoint():
     model, crit = rt.train_member(
         0, 0, cfg, train_ds, val_ds, val_meta, "cpu", max_steps=4,
         eval_every_steps=2, patience=3, lr=1e-3, batch_size=64, steps_per_epoch=4,
-        num_workers=0, log_every=100, blocks=blocks, roles=roles,
+        num_workers=0, log_every=2, blocks=blocks, roles=roles,
         ic_floor=999, run_dir=run_dir, warmup_steps=1, cal_cap=100)
     assert np.isfinite(crit)                    # CE-driven selection happened
     hist = [json.loads(l) for l in open(os.path.join(run_dir,
@@ -472,6 +472,24 @@ def test_train_member_bootstrap_selects_checkpoint():
     assert all(line["bootstrap"] for line in hist)
     assert all(line["stopping_score"] == float("-inf") or
                not np.isfinite(line["stopping_score"]) for line in hist)
+    thist = [json.loads(l) for l in open(os.path.join(run_dir,
+                                                      "train_history_member0.jsonl"))]
+    assert thist and all({"step", "lr", "loss_ema", "per_h_ema", "it_s"} <= set(l)
+                         for l in thist)
+    assert os.path.exists(os.path.join(run_dir, "member_0_latest.pt"))
+    assert os.path.exists(os.path.join(run_dir, "member_0_best.pt"))
+
+
+def test_next_run_dir_sequential_and_claiming():
+    """Numbered run dirs advance monotonically past any existing number, and the
+    claim is the mkdir itself."""
+    root = tempfile.mkdtemp()
+    a = rt.next_run_dir(root=root)
+    b = rt.next_run_dir(root=root)
+    assert (a.name, b.name) == ("r1", "r2") and a.is_dir() and b.is_dir()
+    os.makedirs(os.path.join(root, "r7"))
+    c = rt.next_run_dir(root=root)
+    assert c.name == "r8"
 
 
 # ------------------------------- flags, embargo, manifest, floors, truncation

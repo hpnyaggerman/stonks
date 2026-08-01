@@ -22,6 +22,29 @@ PER_GPU="${1:?usage: run_multi_gpu.sh <members_per_gpu> [extra run_train_v5.py a
 shift || true
 EXTRA=("$@")
 
+# Numbered side-by-side run dirs under models/v5/runs (stock-identity convention):
+# every launch gets its own dir -- config, manifest, histories, checkpoints, logs
+# together -- and no run ever overwrites a previous one. An explicit --run-dir
+# (protocol runs nullc/ro1..ro3, smoke) wins; otherwise claim the next rN ONCE
+# here and pass it to every trainer and the finalize, because per-process
+# auto-claiming would scatter the members across different run dirs.
+RUN_DIR=""
+for ((i = 0; i < ${#EXTRA[@]}; i++)); do
+    case "${EXTRA[$i]}" in
+        --run-dir)   RUN_DIR="${EXTRA[$((i + 1))]:-}" ;;
+        --run-dir=*) RUN_DIR="${EXTRA[$i]#--run-dir=}" ;;
+    esac
+done
+if [ -z "$RUN_DIR" ]; then
+    RUN_DIR="$(python -c 'import run_train_v5 as t; print(t.next_run_dir().relative_to(t.PROJECT_ROOT))')"
+    EXTRA+=(--run-dir "$RUN_DIR")
+fi
+mkdir -p "$RUN_DIR"
+# The launcher's own stream lands in the run dir too, so a detached launch
+# (screen/nohup) needs no external redirect and the run dir is self-contained.
+exec > >(tee -a "$RUN_DIR/run.log") 2>&1
+echo "[multi-gpu] run dir: $RUN_DIR"
+
 # Resolve the GPU id list: an explicit CUDA_VISIBLE_DEVICES wins; otherwise use all.
 if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
     IFS=',' read -ra GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
@@ -53,7 +76,7 @@ echo "[multi-gpu] args: ${COMMON[*]} ${EXTRA[*]+${EXTRA[*]}}"
 pids=()
 for g in "${!GPU_IDS[@]}"; do
     start=$(( g * PER_GPU ))
-    log="train_gpu${g}.log"
+    log="${RUN_DIR}/train_gpu${g}.log"
     echo "[multi-gpu] phys GPU ${GPU_IDS[$g]} -> members [$start, $((start + PER_GPU))) -> $log"
     CUDA_VISIBLE_DEVICES="${GPU_IDS[$g]}" python run_train_v5.py \
         "${COMMON[@]}" ${EXTRA[@]+"${EXTRA[@]}"} \
@@ -84,6 +107,6 @@ done
 echo "[multi-gpu] all $MEMBERS members trained; finalizing (temperatures + artifacts + forecasts)"
 FINALIZE_CMD=(python run_train_v5.py "${COMMON[@]}" ${EXTRA[@]+"${EXTRA[@]}"} \
     --cache-dir cache/v5_gpu0 --forecast-only)
-echo "[multi-gpu] finalize command: ${FINALIZE_CMD[*]}" | tee finalize.log
-"${FINALIZE_CMD[@]}" 2>&1 | tee -a finalize.log
+echo "[multi-gpu] finalize command: ${FINALIZE_CMD[*]}" | tee "$RUN_DIR/finalize.log"
+"${FINALIZE_CMD[@]}" 2>&1 | tee -a "$RUN_DIR/finalize.log"
 echo "[multi-gpu] done"

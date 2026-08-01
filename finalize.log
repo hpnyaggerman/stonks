@@ -1,9 +1,0 @@
-[v5] device=cuda | visible GPUs=4 | current=cuda:0 (NVIDIA GeForce RTX 5090)
-[v5] building frames for 7597 tickers ...
-[v5] usable frames: 7094
-[v5] eval_mode=time eval_tickers=0 val_tickers=0
-[v5] scaler fit on 23948324 train rows
-[v5] era-proxy audit (|rho|>0.2): none
-[v5] class rates [train] (down/neutral/up): 1d:[0.21, 0.58, 0.21]  1w:[0.21, 0.57, 0.22]  1m:[0.21, 0.54, 0.24]  6m:[0.22, 0.51, 0.26]
-[v5] class rates [val] (down/neutral/up): 1d:[0.21, 0.59, 0.21]  1w:[0.22, 0.56, 0.22]  1m:[0.23, 0.53, 0.23]  6m:[0.23, 0.52, 0.25]
-[v5] class rates [oos] (down/neutral/up): 1d:[0.21, 0.58, 0.21]  1w:[0.21, 0.56, 0.23]  1m:[0.22, 0.53, 0.25]  6m:[0.23, 0.46, 0.31]
