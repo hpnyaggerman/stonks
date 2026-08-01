@@ -1227,20 +1227,44 @@ def comparator_report(val_meta, val_ds, ic_floor):
     return "\n".join(lines), recs
 
 
+def lr_drop_gates(ema_at_eval, ce_at_eval, best_ce, window, slope_min, ce_margin):
+    """(train_declining, ce_regressing) over the trailing ``window`` evals.
+
+    train_declining: the train-loss EMA fell by more than ``slope_min`` between
+    ``window`` evals ago and now, both endpoints finite; False while the history
+    is shorter than window + 1 entries. ce_regressing: the last ``window``
+    stopping-side calibrated CEs all sit more than ``ce_margin`` above the
+    historical best -- a record-setting eval can never satisfy it, so improvement
+    of any speed (with or without new records) reads False and only a sustained
+    rise above the best, the overfit signature, fires.
+    """
+    if len(ema_at_eval) <= window:
+        declining = False
+    else:
+        a, b = ema_at_eval[-1 - window], ema_at_eval[-1]
+        declining = math.isfinite(a) and math.isfinite(b) and (a - b) > slope_min
+    recent = ce_at_eval[-window:]
+    regressing = (len(ce_at_eval) >= window
+                  and all(math.isfinite(c) for c in recent)
+                  and min(recent) > best_ce + ce_margin)
+    return declining, regressing
+
+
 def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_steps,
                  eval_every_steps, patience, lr, batch_size, steps_per_epoch,
                  num_workers, log_every, *, blocks, roles, ic_floor, run_dir,
                  panel=None, base_stop=None, lr_patience=4, lr_factor=0.5,
-                 min_lr_scale=0.04, warmup_steps=1000, calibrate=True,
-                 cal_cap=100_000):
+                 min_lr_scale=0.04, lr_train_slope_min=0.002, lr_ce_margin=3e-3,
+                 warmup_steps=1000, calibrate=True, cal_cap=100_000):
     torch.manual_seed(seed)
     model = V5Backbone(cfg).to(device)
     opt = torch.optim.AdamW(optimizer_param_groups(model, weight_decay=0.01),
                             lr=lr, betas=(0.9, 0.95))
 
     # Plateau LR schedule: warm-up, then a constant scale the eval block multiplies
-    # down whenever the stopping criterion stalls; decay is driven by the same
-    # signal as early-stop and cannot decouple from the run length.
+    # down. A drop needs the stopping-score streak plus two regime gates (train
+    # loss still falling, stopping-side calibrated CE in sustained regression), so
+    # score noise alone cannot decay the LR of a run that is still learning.
     lr_scale = 1.0
     plateau_since_drop = 0
 
@@ -1271,6 +1295,7 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
     best_ce = float("inf")
     best_state, since_improve, step = None, 0, 0
     score_hist = []
+    ema_at_eval, ce_at_eval = [], []
     bootstrap = True          # CE-driven until the smoothed stopping score is finite
     loss_ema, t0_time, stop = None, time.time(), False
     per_h_ema = [None] * len(cfg.horizons)
@@ -1279,7 +1304,8 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
     print(f"[member {member_idx}] start | {len(train_ds)} train / "
           f"{0 if val_ds is None else len(val_ds)} val windows | {steps_per_epoch} steps/epoch | "
           f"eval {cadence} | max {max_steps} steps | patience {patience} | "
-          f"warmup {warmup_steps} | plateau LRx{lr_factor}@{lr_patience} floor {min_lr_scale} | "
+          f"warmup {warmup_steps} | gated plateau LRx{lr_factor}@{lr_patience} floor {min_lr_scale} "
+          f"(drop needs train slope > {lr_train_slope_min} and cal-CE > {lr_ce_margin} over best) | "
           f"stopping on smoothed rank-IC score (min improvement 0.05, median of last 3)")
     model.train()
 
@@ -1293,6 +1319,8 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
         score_hist.append(res["stopping_score"])
         smoothed = float(np.median(score_hist[-3:]))
         res["smoothed_score"] = smoothed
+        ema_at_eval.append(loss_ema if loss_ema is not None else float("nan"))
+        ce_at_eval.append(res["cal_ce_stop"])
         if bootstrap and np.isfinite(smoothed):
             bootstrap = False
         if bootstrap:
@@ -1301,6 +1329,9 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
             improved = smoothed > best_score + 0.05
         if res["cal_ce_stop"] < best_ce - 1e-5:
             best_ce = res["cal_ce_stop"]
+        train_declining, ce_regressing = lr_drop_gates(
+            ema_at_eval, ce_at_eval, best_ce, lr_patience, lr_train_slope_min,
+            lr_ce_margin)
         if improved:
             if not bootstrap:
                 best_score = smoothed
@@ -1310,11 +1341,13 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
         else:
             since_improve += 1
             plateau_since_drop += 1
-            if plateau_since_drop >= lr_patience and lr_scale > min_lr_scale:
+            if (plateau_since_drop >= lr_patience and lr_scale > min_lr_scale
+                    and train_declining and ce_regressing):
                 lr_scale = max(min_lr_scale, lr_scale * lr_factor)
                 plateau_since_drop = 0
                 print(f"[member {member_idx}] LR DROP -> {lr * lr_scale:.2e} "
-                      f"(scale {lr_scale:.3f}) after {lr_patience} no-improve evals")
+                      f"(scale {lr_scale:.3f}) after {lr_patience} no-improve evals "
+                      f"(train declining, cal-CE regressing)")
         # Crash durability (run-2's finalize died with every member state only in
         # RAM): latest at each eval, best on improvement. The final member_{i}.pt
         # written after training (best state) remains the loader contract.
@@ -1337,6 +1370,12 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
                 "bootstrap": bool(bootstrap)}
         for k, v in res.items():
             line[k] = v
+        line["lr_scale"] = lr_scale
+        line["train_ema"] = ema_at_eval[-1]
+        line["lr_gate_train_declining"] = bool(train_declining)
+        line["lr_gate_ce_regressing"] = bool(ce_regressing)
+        line["ce_excess"] = (float(min(ce_at_eval[-lr_patience:]) - best_ce)
+                             if len(ce_at_eval) >= lr_patience else None)
         history_f.write(json.dumps(line, default=float) + "\n")
         history_f.flush()
         if since_improve >= patience:
@@ -1723,6 +1762,13 @@ def parse_args():
                    help="Multiplicative LR drop applied on each plateau.")
     p.add_argument("--min-lr-scale", type=float, default=0.04,
                    help="Floor on the LR scale (LR floor = min-lr-scale * --lr).")
+    p.add_argument("--lr-train-slope-min", type=float, default=0.002,
+                   help="LR-drop gate: the train-loss EMA must have fallen by more "
+                        "than this over the trailing --lr-patience evals.")
+    p.add_argument("--lr-ce-margin", type=float, default=3e-3,
+                   help="LR-drop gate: the last --lr-patience stopping-side "
+                        "calibrated CEs must all sit more than this above the "
+                        "running best.")
     p.add_argument("--warmup-steps", type=int, default=1000,
                    help="Linear LR warm-up length in steps.")
     p.add_argument("--judge-cal-cap", type=int, default=100_000,
@@ -1937,8 +1983,9 @@ def main():
                    else "scheduled (250<=2k, 1000<=30k, 5000 after)")
         print(f"[v5] schedule | {steps_per_epoch} steps/epoch | budget {max_steps} steps "
               f"(~{max_steps / steps_per_epoch:.1f} ep) | warmup {args.warmup_steps} | "
-              f"plateau LR x{args.lr_factor} after {args.lr_patience} no-improve evals, "
-              f"floor {args.min_lr_scale} | eval {cadence} | "
+              f"gated plateau LR x{args.lr_factor} after {args.lr_patience} no-improve evals "
+              f"(train slope > {args.lr_train_slope_min}, cal-CE > {args.lr_ce_margin} "
+              f"over best), floor {args.min_lr_scale} | eval {cadence} | "
               f"patience {args.patience} | workers {args.num_workers} | "
               f"members [{start}, {end})")
 
@@ -1995,7 +2042,9 @@ def main():
                 blocks=blocks, roles=roles, ic_floor=ic_floor, run_dir=run_dir,
                 panel=panel_pack, base_stop=base_stop,
                 lr_patience=args.lr_patience, lr_factor=args.lr_factor,
-                min_lr_scale=args.min_lr_scale, warmup_steps=args.warmup_steps,
+                min_lr_scale=args.min_lr_scale,
+                lr_train_slope_min=args.lr_train_slope_min,
+                lr_ce_margin=args.lr_ce_margin, warmup_steps=args.warmup_steps,
                 calibrate=args.calibrate_eval, cal_cap=args.judge_cal_cap)
             model.eval()
             torch.save(model.state_dict(), run_dir / f"member_{i}.pt")

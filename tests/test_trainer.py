@@ -1,5 +1,6 @@
 """Trainer tests: centering, thinning, judged rows, meta/tags, eval pass, both-mode
-routing, class rates, temperatures, flags, embargo, manifest, train price floor."""
+routing, class rates, temperatures, flags, embargo, manifest, train price floor,
+LR-drop gates."""
 import argparse
 import dataclasses
 import json
@@ -478,6 +479,39 @@ def test_train_member_bootstrap_selects_checkpoint():
                          for l in thist)
     assert os.path.exists(os.path.join(run_dir, "member_0_latest.pt"))
     assert os.path.exists(os.path.join(run_dir, "member_0_best.pt"))
+    gate_keys = {"lr_scale", "train_ema", "lr_gate_train_declining",
+                 "lr_gate_ce_regressing", "ce_excess"}
+    assert all(gate_keys <= set(line) for line in hist)
+    # patience (3) < lr_patience (4): early stop structurally precedes any drop.
+    assert hist[-1]["lr_scale"] == 1.0
+
+
+def test_lr_drop_gates_truth_table():
+    """Declining needs a real EMA fall over the window; regressing needs the last
+    window CEs all above the best by the margin, which a record eval can never
+    satisfy, so improvement of any speed holds the LR."""
+    g = rt.lr_drop_gates
+    down = [3.40, 3.39, 3.38, 3.37, 3.36]
+    assert g(down, [3.40, 3.41, 3.41, 3.41], 3.36, 4, 0.002, 3e-3) == (True, True)
+    # record at the current eval: the window min equals the best
+    assert g(down, [3.40, 3.401, 3.402, 3.399], 3.399, 4, 0.002, 3e-3)[1] is False
+    # rapid improvement: regressing stays False at every prefix
+    head = [3.427238, 3.414616, 3.413708, 3.411541, 3.408673]
+    best = float("inf")
+    for i, c in enumerate(head):
+        best = min(best, c)
+        assert g(down, head[:i + 1], best, 4, 0.002, 3e-3)[1] is False
+    # sustained rise above a stale best fires; sub-margin flat noise does not
+    assert g(down, [3.3941, 3.3938, 3.3945, 3.3940], 3.3900, 4, 0.002, 3e-3)[1] is True
+    flat = [3.3915, 3.3908, 3.3912, 3.3902]
+    assert g(down, flat, min(flat) - 1e-4, 4, 0.002, 3e-3)[1] is False
+    # short histories hold: EMA needs window + 1 entries, CE needs window
+    assert g(down[:4], [3.41] * 4, 3.36, 4, 0.002, 3e-3)[0] is False
+    assert g(down, [3.41] * 3, 3.36, 4, 0.002, 3e-3)[1] is False
+    # non-finite endpoints or window members hold; flat EMA holds
+    assert g([float("nan")] + down[1:], [3.41] * 4, 3.36, 4, 0.002, 3e-3)[0] is False
+    assert g(down, [3.41, float("nan"), 3.41, 3.41], 3.36, 4, 0.002, 3e-3)[1] is False
+    assert g([3.36] * 5, [3.41] * 4, 3.36, 4, 0.002, 3e-3)[0] is False
 
 
 def test_next_run_dir_sequential_and_claiming():
