@@ -1,6 +1,6 @@
 """Trainer tests: centering, thinning, judged rows, meta/tags, eval pass, both-mode
 routing, class rates, temperatures, flags, embargo, manifest, train price floor,
-LR-drop gates."""
+LR-drop gates, parquet histories, launch artifacts."""
 import argparse
 import dataclasses
 import json
@@ -468,22 +468,22 @@ def test_train_member_bootstrap_selects_checkpoint():
         num_workers=0, log_every=2, blocks=blocks, roles=roles,
         ic_floor=999, run_dir=run_dir, warmup_steps=1, cal_cap=100)
     assert np.isfinite(crit)                    # CE-driven selection happened
-    hist = [json.loads(l) for l in open(os.path.join(run_dir,
-                                                     "eval_history_member0.jsonl"))]
-    assert all(line["bootstrap"] for line in hist)
-    assert all(line["stopping_score"] == float("-inf") or
-               not np.isfinite(line["stopping_score"]) for line in hist)
-    thist = [json.loads(l) for l in open(os.path.join(run_dir,
-                                                      "train_history_member0.jsonl"))]
-    assert thist and all({"step", "lr", "loss_ema", "per_h_ema", "it_s"} <= set(l)
-                         for l in thist)
+    hist = pd.read_parquet(os.path.join(run_dir, "evals_member0.parquet"))
+    assert len(hist) and hist["bootstrap"].all()
+    assert (~np.isfinite(hist["stopping_score"])).all()
+    thist = pd.read_parquet(os.path.join(run_dir, "train_member0.parquet"))
+    assert len(thist) and {"step", "lr", "loss_ema", "loss_ema_1d", "loss_ema_6m",
+                           "it_s", "elapsed_s"} <= set(thist.columns)
+    for name in ("ic", "top"):
+        pd.read_parquet(os.path.join(run_dir, f"{name}_member0.parquet"))
+    assert not any(f.endswith(".tmp") for f in os.listdir(run_dir))
     assert os.path.exists(os.path.join(run_dir, "member_0_latest.pt"))
     assert os.path.exists(os.path.join(run_dir, "member_0_best.pt"))
     gate_keys = {"lr_scale", "train_ema", "lr_gate_train_declining",
                  "lr_gate_ce_regressing", "ce_excess"}
-    assert all(gate_keys <= set(line) for line in hist)
+    assert gate_keys <= set(hist.columns)
     # patience (3) < lr_patience (4): early stop structurally precedes any drop.
-    assert hist[-1]["lr_scale"] == 1.0
+    assert hist["lr_scale"].iloc[-1] == 1.0
 
 
 def test_lr_drop_gates_truth_table():
@@ -512,6 +512,64 @@ def test_lr_drop_gates_truth_table():
     assert g([float("nan")] + down[1:], [3.41] * 4, 3.36, 4, 0.002, 3e-3)[0] is False
     assert g(down, [3.41, float("nan"), 3.41, 3.41], 3.36, 4, 0.002, 3e-3)[1] is False
     assert g([3.36] * 5, [3.41] * 4, 3.36, 4, 0.002, 3e-3)[0] is False
+
+
+def test_atomic_parquet_rewrite_and_categories():
+    """Each write replaces the file atomically (no .tmp left behind) and the file
+    is a complete snapshot of all rows so far; string columns become categories."""
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "t.parquet")
+    rows = [{"step": 1, "role": "stop", "v": 0.5}]
+    rt._atomic_parquet(rows, path, ("role",))
+    rows.append({"step": 2, "role": "gate", "v": 0.7})
+    rt._atomic_parquet(rows, path, ("role",))
+    assert not os.path.exists(path + ".tmp")
+    back = pd.read_parquet(path)
+    assert list(back["step"]) == [1, 2] and back["v"].iloc[1] == 0.7
+    assert str(back["role"].dtype) == "category"
+
+
+def test_environment_summary_serializable():
+    env = rt.environment_summary()
+    assert {"python", "hostname", "torch", "numpy", "pandas", "pyarrow",
+            "mamba_ssm", "cuda", "gpus"} <= set(env)
+    json.dumps(env)
+
+
+def test_launch_artifact_finalize_asserts():
+    """The finalize refuses to overwrite a training-launch scaler or config that
+    disagrees with its own refit; matching launch files pass."""
+    frames = _mk_frames(4, 300, seed=21)
+    bounds = rt.global_date_bounds(frames, eval_days=40)
+    cfg = V5Config()
+    rows = np.random.default_rng(0).standard_normal((60, fx.N_FEATURES))
+    scaler = fx.RobustScaler.fit(rows)
+    run_dir, fdir = tempfile.mkdtemp(), tempfile.mkdtemp()
+    rt._atomic_json(dataclasses.asdict(cfg), os.path.join(run_dir, "config.json"))
+    scaler.save(os.path.join(run_dir, "v5_norm.json"))
+    rt.write_artifacts(cfg, scaler, bounds, "time", 42, 0.0, set(), [1.0] * 4, [42],
+                       run_dir, fdir)
+    norm = json.load(open(os.path.join(run_dir, "v5_norm.json")))
+    norm["channels"][0]["median"] += 1.0
+    open(os.path.join(run_dir, "v5_norm.json"), "w").write(json.dumps(norm))
+    try:
+        rt.write_artifacts(cfg, scaler, bounds, "time", 42, 0.0, set(), [1.0] * 4, [42],
+                           run_dir, fdir)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("drifted v5_norm.json must refuse to finalize")
+    scaler.save(os.path.join(run_dir, "v5_norm.json"))
+    cfg2 = json.load(open(os.path.join(run_dir, "config.json")))
+    cfg2["d_model"] += 1
+    open(os.path.join(run_dir, "config.json"), "w").write(json.dumps(cfg2))
+    try:
+        rt.write_artifacts(cfg, scaler, bounds, "time", 42, 0.0, set(), [1.0] * 4, [42],
+                           run_dir, fdir)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("drifted config.json must refuse to finalize")
 
 
 def test_next_run_dir_sequential_and_claiming():

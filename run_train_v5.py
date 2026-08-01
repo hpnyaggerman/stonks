@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 
@@ -738,6 +739,35 @@ def next_run_dir(root=RUNS_DIR):
             n += 1
 
 
+def environment_summary():
+    """Versions and hardware behind a run. Version skew has already changed a
+    training outcome on identical code and data (a pandas rolling-std difference
+    across boxes poisoned one box's features), so the manifest records what the
+    git revision cannot."""
+    import platform
+    env = {"python": platform.python_version(), "hostname": platform.node(),
+           "torch": torch.__version__, "numpy": np.__version__,
+           "pandas": pd.__version__}
+    for mod in ("pyarrow", "mamba_ssm"):
+        try:
+            env[mod] = getattr(__import__(mod), "__version__", "installed")
+        except ImportError:
+            env[mod] = None
+    if torch.cuda.is_available():
+        env["cuda"] = torch.version.cuda
+        env["gpus"] = sorted({torch.cuda.get_device_name(i)
+                              for i in range(torch.cuda.device_count())})
+    else:
+        env["cuda"], env["gpus"] = None, []
+    return env
+
+
+def _atomic_json(obj, path):
+    tmp = str(path) + ".tmp"
+    Path(tmp).write_text(json.dumps(obj, indent=2, default=float), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def write_run_manifest(args, run_dir):
     """Written only by the ``--member-start 0`` process, immediately after argument
     resolution (post --smoke mutation, so recorded values are effective), via
@@ -750,6 +780,7 @@ def write_run_manifest(args, run_dir):
         "data_fingerprint": data_fingerprint(),
         "feature_names_hash": fx.feature_names_hash(),
         "run_nonce": os.environ.get("RUN_NONCE"),
+        "environment": environment_summary(),
         "scaler_rows": None,
     }
     tmp = run_dir / "run_manifest.json.tmp"
@@ -1227,6 +1258,23 @@ def comparator_report(val_meta, val_ds, ic_floor):
     return "\n".join(lines), recs
 
 
+IC_CATEGORY_COLS = ("horizon", "score", "mask", "role", "trad")
+
+
+def _atomic_parquet(rows, path, category_cols=()):
+    """Rewrite ``path`` from ``rows`` via temp file + atomic rename. The on-disk
+    file is a complete, readable parquet at every instant of a run, so a killed
+    process -- the normal terminal state here -- loses at most the in-flight tick;
+    at this file scale the full rewrite costs milliseconds per tick."""
+    df = pd.DataFrame(rows)
+    for c in category_cols:
+        if c in df.columns:
+            df[c] = df[c].astype("category")
+    tmp = str(path) + ".tmp"
+    df.to_parquet(tmp, compression="zstd", index=False)
+    os.replace(tmp, path)
+
+
 def lr_drop_gates(ema_at_eval, ce_at_eval, best_ce, window, slope_min, ce_margin):
     """(train_declining, ce_regressing) over the trailing ``window`` evals.
 
@@ -1278,10 +1326,11 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
         m_stop, stop_rows = stopping_selection(val_meta, val_ds.mask, blocks, roles)
     else:
         m_stop, stop_rows = None, None
-    history_path = Path(run_dir) / f"eval_history_member{member_idx}.jsonl"
-    history_f = open(history_path, "w", encoding="utf-8")
-    train_history_path = Path(run_dir) / f"train_history_member{member_idx}.jsonl"
-    train_f = open(train_history_path, "w", encoding="utf-8")
+    hist_paths = {name: Path(run_dir) / f"{name}_member{member_idx}.parquet"
+                  for name in ("evals", "ic", "top", "train")}
+    for p in hist_paths.values():
+        Path(f"{p}.tmp").unlink(missing_ok=True)
+    eval_rows, ic_rows, top_rows, train_rows = [], [], [], []
 
     pin = device == "cuda"
     loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False,
@@ -1366,18 +1415,31 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
               f"lr_scale {lr_scale:.3f} | "
               f"{'IMPROVED' if improved else f'no-improve {since_improve}/{patience}'}"
               + (" [bootstrap: CE-driven]" if bootstrap else ""))
-        line = {"step": step, "smoothed_score": smoothed, "improved": bool(improved),
-                "bootstrap": bool(bootstrap)}
+        row = {"step": step, "smoothed_score": smoothed, "improved": bool(improved),
+               "bootstrap": bool(bootstrap)}
         for k, v in res.items():
-            line[k] = v
-        line["lr_scale"] = lr_scale
-        line["train_ema"] = ema_at_eval[-1]
-        line["lr_gate_train_declining"] = bool(train_declining)
-        line["lr_gate_ce_regressing"] = bool(ce_regressing)
-        line["ce_excess"] = (float(min(ce_at_eval[-lr_patience:]) - best_ce)
-                             if len(ce_at_eval) >= lr_patience else None)
-        history_f.write(json.dumps(line, default=float) + "\n")
-        history_f.flush()
+            if k in ("ic_records", "ic_records_tag1", "top_records"):
+                continue
+            if k == "judged_T":
+                for hl, tv in zip(HORIZON_LABELS, v):
+                    row[f"judged_T_{hl}"] = tv
+            else:
+                row[k] = v
+        row["lr_scale"] = lr_scale
+        row["train_ema"] = ema_at_eval[-1]
+        row["lr_gate_train_declining"] = bool(train_declining)
+        row["lr_gate_ce_regressing"] = bool(ce_regressing)
+        row["ce_excess"] = (float(min(ce_at_eval[-lr_patience:]) - best_ce)
+                            if len(ce_at_eval) >= lr_patience else None)
+        eval_rows.append(row)
+        for tag, key in ((0, "ic_records"), (1, "ic_records_tag1")):
+            for r in res.get(key) or ():
+                ic_rows.append({"step": step, "tag": tag, **r})
+        for r in res.get("top_records") or ():
+            top_rows.append({"step": step, **r})
+        _atomic_parquet(eval_rows, hist_paths["evals"])
+        _atomic_parquet(ic_rows, hist_paths["ic"], IC_CATEGORY_COLS)
+        _atomic_parquet(top_rows, hist_paths["top"], IC_CATEGORY_COLS)
         if since_improve >= patience:
             stop = True
 
@@ -1411,13 +1473,12 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
                 print(f"[member {member_idx}] step {step}/{max_steps} (ep {step / steps_per_epoch:.2f}) | "
                       f"loss {loss_ema:.4f} [{per_h_str}] | lr {cur_lr:.2e} | {sps:.1f} it/s | "
                       f"eta {(max_steps - step) / max(1e-9, sps) / 60:.0f}m")
-                train_f.write(json.dumps(
+                train_rows.append(
                     {"step": step, "lr": cur_lr, "loss_ema": loss_ema,
-                     "per_h_ema": {HORIZON_LABELS[hi]: per_h_ema[hi]
-                                   for hi in range(len(cfg.horizons))},
-                     "it_s": sps, "elapsed_s": time.time() - t0_time},
-                    default=float) + "\n")
-                train_f.flush()
+                     **{f"loss_ema_{HORIZON_LABELS[hi]}": per_h_ema[hi]
+                        for hi in range(len(cfg.horizons))},
+                     "it_s": sps, "elapsed_s": time.time() - t0_time})
+                _atomic_parquet(train_rows, hist_paths["train"])
             eval_now = (step % eval_every_steps == 0) if eval_every_steps else eval_due(step)
             if (eval_now or step >= max_steps) and have_val:
                 run_eval()
@@ -1427,8 +1488,6 @@ def train_member(member_idx, seed, cfg, train_ds, val_ds, val_meta, device, max_
             elif step >= max_steps:
                 stop = True
                 break
-    history_f.close()
-    train_f.close()
     if best_state is not None:
         model.load_state_dict(best_state)
     crit = f"score {best_score:+.3f}" if np.isfinite(best_score) else f"cal CE {best_ce:.4f}"
@@ -1664,7 +1723,19 @@ def write_artifacts(cfg, scaler, bounds, eval_mode, seed, ticker_frac, eval_tick
     run_dir = Path(run_dir)
     forecast_dir = Path(forecast_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    scaler.save(run_dir / "v5_norm.json")
+    # The training launch wrote the scaler; a finalize refit that disagrees means
+    # the data or numeric environment drifted between training and finalize, and
+    # overwriting would silently skew serve-time normalization.
+    norm_path = run_dir / "v5_norm.json"
+    if norm_path.exists():
+        prior = fx.RobustScaler.load(norm_path)
+        if (not np.array_equal(prior.medians, scaler.medians)
+                or not np.array_equal(prior.scales, scaler.scales)
+                or prior.rules != scaler.rules):
+            raise SystemExit("v5_norm.json from the training launch does not match "
+                             "the finalize scaler refit -- data or environment "
+                             "drifted; refusing to overwrite")
+    scaler.save(norm_path)
 
     d = lambda x: str(np.datetime_as_string(np.datetime64(x), unit="D"))
     meta = {
@@ -1698,8 +1769,12 @@ def write_artifacts(cfg, scaler, bounds, eval_mode, seed, ticker_frac, eval_tick
     if extra_meta:
         meta.update(extra_meta)
     (run_dir / "v5_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    (run_dir / "config.json").write_text(
-        json.dumps(dataclasses.asdict(cfg), indent=2), encoding="utf-8")
+    cfg_json = json.loads(json.dumps(dataclasses.asdict(cfg)))
+    cfg_path = run_dir / "config.json"
+    if cfg_path.exists() and json.loads(cfg_path.read_text(encoding="utf-8")) != cfg_json:
+        raise SystemExit("config.json from the training launch does not match the "
+                         "finalize config; refusing to overwrite")
+    cfg_path.write_text(json.dumps(cfg_json, indent=2), encoding="utf-8")
 
     split_info = {
         "eval_mode": eval_mode,
@@ -1991,6 +2066,8 @@ def main():
 
         base_stop = None
         comp_text = None
+        comp_recs = None
+        launch_baselines = None
         if val_ds is not None:
             tag = np.asarray(val_meta["tag"])
             rows_tag0 = np.flatnonzero(tag == 0)
@@ -1998,11 +2075,13 @@ def main():
             print(f"[v5] val constant-marginal baseline CE (tag-0) = {base_tag0:.4f} "
                   f"({rows_tag0.size} rows; the model must beat this to be learning "
                   "anything conditional)")
+            base_tag1, n_tag1 = None, 0
             if (tag == 1).any():
                 rows_tag1 = np.flatnonzero(tag == 1)
+                base_tag1 = float(val_marginal_baseline_ce(val_ds, cfg, rows=rows_tag1))
+                n_tag1 = int(rows_tag1.size)
                 print(f"[v5] val constant-marginal baseline CE (tag-1 holdout) = "
-                      f"{val_marginal_baseline_ce(val_ds, cfg, rows=rows_tag1):.4f} "
-                      f"({rows_tag1.size} rows; report-only)")
+                      f"{base_tag1:.4f} ({n_tag1} rows; report-only)")
             # Startup baseline flavors with per-horizon components (both flavors --
             # millinat verdicts must not hinge on the flavor).
             train_z, train_m = None, None
@@ -2021,15 +2100,68 @@ def main():
                 print(f"[v5] baseline[{flavor_name}] total {comp['total']:.4f} | {per_h}")
             # Stopping-side baseline on the judged score half: identical rows.
             m_stop, stop_rows = stopping_selection(val_meta, val_ds.mask, blocks, roles)
+            n_base_stop = 0
             if stop_rows.size:
                 capped = _spread_indices(stop_rows.size, args.judge_cal_cap)
                 parity = np.arange(capped.size) % 2
                 score_half = stop_rows[capped[parity == 1]]
                 base_stop = val_marginal_baseline_ce_subset(
                     val_ds, cfg, score_half, mask_override=m_stop, horizons=(0, 1))
+                n_base_stop = int(score_half.size)
                 print(f"[v5] stopping-side baseline CE = {base_stop:.4f} "
-                      f"({score_half.size} score-half rows, {{1d,1w}} interval labels)")
-            comp_text, _ = comparator_report(val_meta, val_ds, ic_floor)
+                      f"({n_base_stop} score-half rows, {{1d,1w}} interval labels)")
+            comp_text, comp_recs = comparator_report(val_meta, val_ds, ic_floor)
+            launch_baselines = {
+                "tag0_marginal_ce": float(base_tag0), "tag0_rows": int(rows_tag0.size),
+                "tag1_marginal_ce": base_tag1, "tag1_rows": n_tag1,
+                "flavors": {name: {"total": float(comp["total"]),
+                                   "per_h": [float(x) for x in comp["per_h"]]}
+                            for name, comp in vb.items()},
+                "stopping_side_ce": None if base_stop is None else float(base_stop),
+                "stopping_side_rows": n_base_stop,
+            }
+
+        # Launch-time resolved-run record: config, scaler, and split facts land
+        # before step 1 so a killed run -- the normal terminal state under the
+        # stopping protocol -- remains fully interpretable and scoreable.
+        if start == 0:
+            dd = lambda x: str(np.datetime_as_string(np.datetime64(x), unit="D"))
+            _atomic_json(dataclasses.asdict(cfg), run_dir / "config.json")
+            scaler.save(run_dir / "v5_norm.json")
+            split_meta = {
+                "eval_mode": args.eval_mode,
+                "train_start": dd(bounds["data_start"]), "train_end": dd(bounds["train_end"]),
+                "val_start": dd(bounds["train_cut"]), "val_end": dd(bounds["val_end"]),
+                "data_end": dd(bounds["data_end"]),
+                "embargo": _embargo_dates(bounds, cfg.horizons),
+                "ticker_holdout": {"seed": args.seed, "frac": args.ticker_holdout_frac,
+                                   "eval_tickers": sorted(eval_tickers)},
+                "val_tickers": sorted(val_tickers),
+                "universe": {"frames": len(frames), "eval_tickers": len(eval_tickers),
+                             "val_tickers": len(val_tickers)},
+                "blocks": [{"role": r, "start": dd(np.datetime64(int(b[0]), "ns")),
+                            "end": dd(np.datetime64(int(b[-1]), "ns")),
+                            "sessions": int(b.size)}
+                           for b, r in zip(blocks, roles)],
+                "schedule": {"steps_per_epoch": steps_per_epoch, "max_steps": max_steps,
+                             "epochs": args.epochs, "eval_cadence": cadence,
+                             "warmup_steps": args.warmup_steps,
+                             "batch_size": args.batch_size, "lr": args.lr,
+                             "lr_patience": args.lr_patience, "lr_factor": args.lr_factor,
+                             "min_lr_scale": args.min_lr_scale,
+                             "lr_train_slope_min": args.lr_train_slope_min,
+                             "lr_ce_margin": args.lr_ce_margin,
+                             "patience": args.patience, "member_seeds": seeds},
+                "counts": {"train_windows": len(train_ds),
+                           "val_windows": 0 if val_ds is None else len(val_ds)},
+                "baselines": launch_baselines,
+                "comparators": comp_recs,
+            }
+            if args.eval_mode in ("time", "both"):
+                split_meta["oos_start"] = dd(bounds["train_val_cut"])
+            _atomic_json(split_meta, run_dir / "split_meta.json")
+            print(f"[v5] wrote launch artifacts (config.json, v5_norm.json, "
+                  f"split_meta.json) to {run_dir}")
 
         members = []
         for i in range(start, end):
