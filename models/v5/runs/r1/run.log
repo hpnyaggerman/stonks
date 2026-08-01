@@ -1,0 +1,7 @@
+[multi-gpu] run dir: models/v5/runs/r1
+[multi-gpu] GPUs=0 1 2 3 | members/GPU=1 | total members=4 | nonce=1785588746-43620
+[multi-gpu] args: --members 4 --seed 42 --batch-size 256 --num-workers 8 --epochs 3 --patience 20 --val-subsample 150000 --log-every 100 --device cuda --eval-mode both --ticker-holdout-frac 0.1 --run-dir models/v5/runs/r1
+[multi-gpu] phys GPU 0 -> members [0, 1) -> models/v5/runs/r1/train_gpu0.log
+[multi-gpu] phys GPU 1 -> members [1, 2) -> models/v5/runs/r1/train_gpu1.log
+[multi-gpu] phys GPU 2 -> members [2, 3) -> models/v5/runs/r1/train_gpu2.log
+[multi-gpu] phys GPU 3 -> members [3, 4) -> models/v5/runs/r1/train_gpu3.log

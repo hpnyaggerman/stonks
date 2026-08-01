@@ -1,0 +1,52 @@
+[multi-gpu] finalize command: python run_train_v5.py --members 4 --seed 42 --batch-size 256 --num-workers 8 --epochs 3 --patience 20 --val-subsample 150000 --log-every 100 --device cuda --eval-mode both --ticker-holdout-frac 0.1 --run-dir models/v5/runs/r2 --cache-dir cache/v5_gpu0 --forecast-only
+[v5] device=cuda | visible GPUs=4 | current=cuda:0 (NVIDIA GeForce RTX 5090)
+[v5] finalize snapshot assert passed (data fingerprint, git revision, split-relevant args)
+[v5] building frames for 7597 tickers ...
+[v5] integrity [pre2008]: rows 8470610 | sigma-floor 0.0037 | close<$1 0.0172 | spike-censorship 1d:0.0007  1w:0.0031  1m:0.0118  6m:0.0602
+[v5] integrity [2008-2015]: rows 6590457 | sigma-floor 0.0095 | close<$1 0.0380 | spike-censorship 1d:0.0008  1w:0.0032  1m:0.0110  6m:0.0470
+[v5] integrity [2016+]: rows 11283703 | sigma-floor 0.0182 | close<$1 0.0445 | spike-censorship 1d:0.0011  1w:0.0048  1m:0.0171  6m:0.0735
+[v5] fear_greed coverage ends 2026-03-13 vs OHLCV data end 2026-06-08 (FROZEN-FG SPAN: refresh fear_greed.csv)
+[v5] usable frames: 7094
+[v5] eval_mode=both eval_tickers=702 val_tickers=0
+[v5] scaler fit on 21484284 train rows
+[v5] era-proxy audit (|rho|>0.2): none
+[v5] label centering: K=50 | sessions with undefined c per horizon [2960, 2978, 3039, 3333] of 16214
+[v5] class rates [train] (down/neutral/up): 1d:[0.18, 0.63, 0.19]  1w:[0.19, 0.62, 0.2]  1m:[0.2, 0.6, 0.2]  6m:[0.21, 0.58, 0.21]
+[v5] class rates [val] (down/neutral/up): 1d:[0.18, 0.64, 0.18]  1w:[0.19, 0.61, 0.2]  1m:[0.21, 0.58, 0.21]  6m:[0.23, 0.53, 0.23]
+[v5] thinning retained train labels: 1d:21285344/21285344  1w:21188211/21188211  1m:5218354/20873105  6m:774739/19365056
+[v5] thinning: 2917 train anchors lost all labels (gap-straddling or thinned out) and were skipped
+[v5] train price floor [pre2008]: dropped 125482/7290179 anchors (0.0172) below $1.0
+[v5] train price floor [2008-2015]: dropped 212922/5769298 anchors (0.0369) below $1.0
+[v5] train price floor [2016+]: dropped 327889/7687074 anchors (0.0427) below $1.0
+[v5] train windows: 20018240 | val windows (subsampled): 265701 | panel windows: 0 | eval tickers: 4992
+[v5] forecast-only: loaded 4 members from models/v5/runs/r2
+[v5] fitting temperatures on 265701 val windows (fp16 logit cache) ...
+[v5] temperature[1d] = 1.00 (72816 stopping-side labels)
+[v5] temperature[1w] = 1.00 (67737 stopping-side labels)
+[v5] temperature[1m] = 1.0, temperature[6m] = 1.0 (rule: 1m/6m are excluded from the stopping-side fit and always persist T=1)
+[v5] temperatures: [1.0, 1.0, 1.0, 1.0]
+[v5] score floors (p95, tradability-filtered, stopping-block anchors): {'1d': 0.05871279910206795, '1w': 0.1166805699467659, '1m': 0.14114655554294586, '6m': 0.1314132809638977}
+[parity] max-abs logit diff 1.526e-05
+[v5] forecasting 4992 eval tickers (all OOS rows) ...
+[v5] forecast 250/4992 tickers | 58476 rows | 0.5m elapsed | 8.4 tic/s | eta 9m
+[v5] forecast 500/4992 tickers | 119326 rows | 1.0m elapsed | 8.2 tic/s | eta 9m
+[v5] forecast 750/4992 tickers | 178452 rows | 1.5m elapsed | 8.2 tic/s | eta 9m
+[v5] forecast 1000/4992 tickers | 237208 rows | 2.0m elapsed | 8.3 tic/s | eta 8m
+[v5] forecast 1250/4992 tickers | 298503 rows | 2.5m elapsed | 8.2 tic/s | eta 8m
+[v5] forecast 1500/4992 tickers | 358814 rows | 3.1m elapsed | 8.2 tic/s | eta 7m
+[v5] forecast 1750/4992 tickers | 417576 rows | 3.6m elapsed | 8.2 tic/s | eta 7m
+[v5] forecast 2000/4992 tickers | 477978 rows | 4.1m elapsed | 8.2 tic/s | eta 6m
+[v5] forecast 2250/4992 tickers | 537024 rows | 4.6m elapsed | 8.2 tic/s | eta 6m
+[v5] forecast 2500/4992 tickers | 596609 rows | 5.1m elapsed | 8.2 tic/s | eta 5m
+[v5] forecast 2750/4992 tickers | 657737 rows | 5.6m elapsed | 8.2 tic/s | eta 5m
+[v5] forecast 3000/4992 tickers | 718469 rows | 6.1m elapsed | 8.2 tic/s | eta 4m
+[v5] forecast 3250/4992 tickers | 778854 rows | 6.6m elapsed | 8.2 tic/s | eta 4m
+[v5] forecast 3500/4992 tickers | 840019 rows | 7.2m elapsed | 8.2 tic/s | eta 3m
+[v5] forecast 3750/4992 tickers | 898096 rows | 7.6m elapsed | 8.2 tic/s | eta 3m
+[v5] forecast 4000/4992 tickers | 958431 rows | 8.2m elapsed | 8.2 tic/s | eta 2m
+[v5] forecast 4250/4992 tickers | 1016514 rows | 8.7m elapsed | 8.2 tic/s | eta 2m
+[v5] forecast 4500/4992 tickers | 1076583 rows | 9.2m elapsed | 8.2 tic/s | eta 1m
+[v5] forecast 4750/4992 tickers | 1136838 rows | 9.7m elapsed | 8.2 tic/s | eta 0m
+[v5] forecast complete | 4992/4992 tickers | 1194134 rows | 10.2m
+[v5] wrote 4992 forecast CSVs to /root/stonks/forecasts/r2
+[v5] done.

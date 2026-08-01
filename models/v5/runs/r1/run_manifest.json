@@ -1,0 +1,107 @@
+{
+  "args": {
+    "eval_mode": "both",
+    "ticker_holdout_frac": 0.1,
+    "seed": 42,
+    "members": 4,
+    "max_tickers": null,
+    "window": 252,
+    "d_model": 256,
+    "n_blocks": 6,
+    "batch_size": 256,
+    "eval_days": 254,
+    "data_start": null,
+    "data_end": null,
+    "run_dir": "models/v5/runs/r1",
+    "epochs": 3.0,
+    "max_steps": null,
+    "eval_every_steps": null,
+    "patience": 20,
+    "lr_patience": 4,
+    "lr_factor": 0.5,
+    "min_lr_scale": 0.04,
+    "warmup_steps": 1000,
+    "judge_cal_cap": 100000,
+    "calibrate_eval": true,
+    "val_subsample": 150000,
+    "num_workers": 8,
+    "log_every": 100,
+    "lr": 0.0003,
+    "device": "cuda",
+    "tickers": null,
+    "max_windows": null,
+    "max_forecast_rows": null,
+    "label_shuffle_within_date": false,
+    "design_freeze": false,
+    "member_start": 0,
+    "member_count": 1,
+    "cache_dir": "cache/v5_gpu0",
+    "skip_forecast": true,
+    "forecast_only": false,
+    "smoke": false
+  },
+  "git_revision": "93e26e3774cc3febef89fde49eae2b4464e2a6e0",
+  "data_fingerprint": {
+    "files": [
+      [
+        "ohlcv_part_000.parquet",
+        60934090,
+        1785580841.1583905
+      ],
+      [
+        "ohlcv_part_001.parquet",
+        61755091,
+        1785580841.450384
+      ],
+      [
+        "ohlcv_part_002.parquet",
+        61627375,
+        1785580841.750377
+      ],
+      [
+        "ohlcv_part_003.parquet",
+        67823416,
+        1785580842.0823696
+      ],
+      [
+        "ohlcv_part_004.parquet",
+        70802743,
+        1785580842.4343615
+      ],
+      [
+        "ohlcv_part_005.parquet",
+        71102347,
+        1785580842.7863536
+      ],
+      [
+        "ohlcv_part_006.parquet",
+        71518619,
+        1785580843.1423454
+      ],
+      [
+        "ohlcv_part_007.parquet",
+        71034060,
+        1785580843.4983373
+      ],
+      [
+        "ohlcv_part_008.parquet",
+        70865085,
+        1785580843.8463295
+      ],
+      [
+        "ohlcv_part_009.parquet",
+        20590648,
+        1785580843.954327
+      ],
+      [
+        "fear_greed.csv",
+        77626,
+        1785576105.9451668
+      ]
+    ],
+    "census_sha256": "73d21206030391c4efbbeae7b85d5771ee67e9691c478529e82223e716c39f0d"
+  },
+  "feature_names_hash": "cf91a42347c678b3b218dc5ff205f44bb9b20ee672ae98bc0b017e2c6dd69bf9",
+  "run_nonce": "1785588746-43620",
+  "scaler_rows": 21484284
+}

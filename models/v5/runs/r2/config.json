@@ -1,0 +1,32 @@
+{
+  "n_features": 40,
+  "window": 252,
+  "min_real_rows": 126,
+  "d_model": 256,
+  "n_blocks": 6,
+  "d_state": 16,
+  "d_conv": 4,
+  "expand": 2,
+  "mlp_mult": 2,
+  "dropout": 0.1,
+  "d_id": 64,
+  "d_mkt": 64,
+  "d_feed": 6,
+  "p_cond": 0.25,
+  "lam_cls": 0.1,
+  "horizons": [
+    1,
+    5,
+    21,
+    126
+  ],
+  "n_bins": 60,
+  "bin_width": 0.1348,
+  "z_clip": 4.044,
+  "theta_bins": [
+    5,
+    5,
+    5,
+    5
+  ]
+}

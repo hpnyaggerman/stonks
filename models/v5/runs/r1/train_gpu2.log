@@ -1,0 +1,247 @@
+[v5] device=cuda | visible GPUs=1 | current=cuda:0 (NVIDIA GeForce RTX 5090)
+[v5] building frames for 7597 tickers ...
+[v5] integrity [pre2008]: rows 8470610 | sigma-floor 0.0037 | close<$1 0.0172 | spike-censorship 1d:0.0007  1w:0.0031  1m:0.0118  6m:0.0602
+[v5] integrity [2008-2015]: rows 6590457 | sigma-floor 0.0095 | close<$1 0.0380 | spike-censorship 1d:0.0008  1w:0.0032  1m:0.0110  6m:0.0470
+[v5] integrity [2016+]: rows 11283703 | sigma-floor 0.0182 | close<$1 0.0445 | spike-censorship 1d:0.0011  1w:0.0048  1m:0.0171  6m:0.0735
+[v5] fear_greed coverage ends 2026-03-13 vs OHLCV data end 2026-06-08 (FROZEN-FG SPAN: refresh fear_greed.csv)
+[v5] usable frames: 7094
+[v5] run manifest check passed (nonce 1785588746-43620)
+[v5] eval_mode=both eval_tickers=702 val_tickers=0
+[v5] scaler fit on 21484284 train rows
+[v5] era-proxy audit (|rho|>0.2): none
+[v5] label centering: K=50 | sessions with undefined c per horizon [2960, 2978, 3039, 3333] of 16214
+[v5] class rates [train] (down/neutral/up): 1d:[0.18, 0.63, 0.19]  1w:[0.19, 0.62, 0.2]  1m:[0.2, 0.6, 0.2]  6m:[0.21, 0.58, 0.21]
+[v5] class rates [val] (down/neutral/up): 1d:[0.18, 0.64, 0.18]  1w:[0.19, 0.61, 0.2]  1m:[0.21, 0.58, 0.21]  6m:[0.23, 0.53, 0.23]
+[v5] thinning retained train labels: 1d:21285344/21285344  1w:21188211/21188211  1m:5218354/20873105  6m:774739/19365056
+[v5] thinning: 2917 train anchors lost all labels (gap-straddling or thinned out) and were skipped
+[v5] train price floor [pre2008]: dropped 125482/7290179 anchors (0.0172) below $1.0
+[v5] train price floor [2008-2015]: dropped 212922/5769298 anchors (0.0369) below $1.0
+[v5] train price floor [2016+]: dropped 327889/7687074 anchors (0.0427) below $1.0
+[v5] train windows: 20018240 | val windows (subsampled): 265701 | panel windows: 0 | eval tickers: 4992
+[v5] schedule | 78197 steps/epoch | budget 234591 steps (~3.0 ep) | warmup 1000 | plateau LR x0.5 after 4 no-improve evals, floor 0.04 | eval scheduled (250<=2k, 1000<=30k, 5000 after) | patience 20 | workers 8 | members [2, 3)
+[v5] val constant-marginal baseline CE (tag-0) = 3.4514 (150000 rows; the model must beat this to be learning anything conditional)
+[v5] val constant-marginal baseline CE (tag-1 holdout) = 3.4550 (115701 rows; report-only)
+[v5] baseline[oracle] total 3.4514 | 1d:3.3771 1w:3.4358 1m:3.4963 6m:3.5634
+[v5] baseline[train_marginal] total 3.4539 | 1d:3.3779 1w:3.4365 1m:3.4991 6m:3.5732
+[v5] stopping-side baseline CE = 3.4251 (36408 score-half rows, {1d,1w} interval labels)
+[v5] comparator momentum_20d: 1d: IC -0.0079 t -1.34 (252d) | 1w: IC -0.0121 t -1.20 (248d) | 1m: IC -0.0039 t -0.27 (231d) | 6m: IC +0.0281 t +9.06 (127d)
+[v5] comparator reversal_5d: 1d: IC +0.0105 t +1.98 (252d) | 1w: IC +0.0166 t +1.81 (248d) | 1m: IC +0.0120 t +1.19 (231d) | 6m: IC -0.0181 t -5.87 (127d)
+[v5] comparator vol_z: 1d: IC +0.0038 t +0.84 (252d) | 1w: IC +0.0034 t +0.47 (248d) | 1m: IC -0.0063 t -0.62 (231d) | 6m: IC +0.0047 t +0.63 (127d)
+[member 2] start | 20018240 train / 265701 val windows | 78197 steps/epoch | eval scheduled (250<=2k, 1000<=30k, 5000 after) | max 234591 steps | patience 20 | warmup 1000 | plateau LRx0.5@4 floor 0.04 | stopping on smoothed rank-IC score (min improvement 0.05, median of last 3)
+[member 2] step 100/234591 (ep 0.00) | loss 4.1512 [1d:4.141 1w:4.148 1m:4.194 6m:4.215] | lr 3.00e-05 | 8.1 it/s | eta 481m
+[member 2] step 200/234591 (ep 0.00) | loss 3.5717 [1d:3.557 1w:3.566 1m:3.624 6m:3.761] | lr 6.00e-05 | 10.2 it/s | eta 385m
+[member 2] EVAL step 250 (ep 0.00) | stop-score +3.569 (smoothed +3.569, best +3.569) | t1d +2.78/125d t1w +2.27/121d | cal_ce 3.4266 (36408 rows) | base 3.4251 MISS | raw_tag0 3.4581 | lr_scale 1.000 | IMPROVED
+[member 2] step 300/234591 (ep 0.00) | loss 3.4287 [1d:3.412 1w:3.429 1m:3.473 6m:3.553] | lr 9.00e-05 | 1.3 it/s | eta 2924m
+[member 2] step 400/234591 (ep 0.01) | loss 3.4087 [1d:3.387 1w:3.413 1m:3.468 6m:3.471] | lr 1.20e-04 | 1.7 it/s | eta 2265m
+[member 2] step 500/234591 (ep 0.01) | loss 3.3975 [1d:3.383 1w:3.398 1m:3.443 6m:3.444] | lr 1.50e-04 | 2.1 it/s | eta 1869m
+[member 2] EVAL step 500 (ep 0.01) | stop-score +3.523 (smoothed +3.546, best +3.569) | t1d +2.75/125d t1w +2.23/121d | cal_ce 3.4147 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4429 | lr_scale 1.000 | no-improve 1/20
+[member 2] step 600/234591 (ep 0.01) | loss 3.3988 [1d:3.381 1w:3.403 1m:3.445 6m:3.463] | lr 1.80e-04 | 1.4 it/s | eta 2811m
+[member 2] step 700/234591 (ep 0.01) | loss 3.3885 [1d:3.372 1w:3.393 1m:3.428 6m:3.452] | lr 2.10e-04 | 1.6 it/s | eta 2452m
+[member 2] EVAL step 750 (ep 0.01) | stop-score +3.790 (smoothed +3.569, best +3.569) | t1d +3.22/125d t1w +2.14/121d | cal_ce 3.4100 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4316 | lr_scale 1.000 | no-improve 2/20
+[member 2] step 800/234591 (ep 0.01) | loss 3.3787 [1d:3.362 1w:3.383 1m:3.410 6m:3.495] | lr 2.40e-04 | 1.3 it/s | eta 3077m
+[member 2] step 900/234591 (ep 0.01) | loss 3.3899 [1d:3.376 1w:3.392 1m:3.424 6m:3.474] | lr 2.70e-04 | 1.4 it/s | eta 2766m
+[member 2] step 1000/234591 (ep 0.01) | loss 3.3918 [1d:3.369 1w:3.401 1m:3.435 6m:3.473] | lr 3.00e-04 | 1.5 it/s | eta 2518m
+[member 2] EVAL step 1000 (ep 0.01) | stop-score +2.955 (smoothed +3.523, best +3.569) | t1d +2.28/125d t1w +1.90/121d | cal_ce 3.4127 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4435 | lr_scale 1.000 | no-improve 3/20
+[member 2] step 1100/234591 (ep 0.01) | loss 3.3788 [1d:3.364 1w:3.383 1m:3.415 6m:3.414] | lr 3.00e-04 | 1.3 it/s | eta 2986m
+[member 2] step 1200/234591 (ep 0.02) | loss 3.3865 [1d:3.366 1w:3.394 1m:3.432 6m:3.450] | lr 3.00e-04 | 1.4 it/s | eta 2761m
+[member 2] EVAL step 1250 (ep 0.02) | stop-score +3.820 (smoothed +3.790, best +3.790) | t1d +3.07/125d t1w +2.33/121d | cal_ce 3.4096 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4267 | lr_scale 1.000 | IMPROVED
+[member 2] step 1300/234591 (ep 0.02) | loss 3.3856 [1d:3.375 1w:3.388 1m:3.411 6m:3.447] | lr 3.00e-04 | 1.2 it/s | eta 3126m
+[member 2] step 1400/234591 (ep 0.02) | loss 3.3880 [1d:3.369 1w:3.395 1m:3.432 6m:3.422] | lr 3.00e-04 | 1.3 it/s | eta 2922m
+[member 2] step 1500/234591 (ep 0.02) | loss 3.3817 [1d:3.365 1w:3.382 1m:3.431 6m:3.506] | lr 3.00e-04 | 1.4 it/s | eta 2746m
+[member 2] EVAL step 1500 (ep 0.02) | stop-score +3.541 (smoothed +3.541, best +3.790) | t1d +2.79/125d t1w +2.22/121d | cal_ce 3.4079 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4314 | lr_scale 1.000 | no-improve 1/20
+[member 2] step 1600/234591 (ep 0.02) | loss 3.3821 [1d:3.355 1w:3.391 1m:3.438 6m:3.534] | lr 3.00e-04 | 1.3 it/s | eta 3040m
+[member 2] step 1700/234591 (ep 0.02) | loss 3.3856 [1d:3.362 1w:3.394 1m:3.439 6m:3.473] | lr 3.00e-04 | 1.3 it/s | eta 2878m
+[member 2] EVAL step 1750 (ep 0.02) | stop-score +3.660 (smoothed +3.660, best +3.790) | t1d +3.00/125d t1w +2.18/121d | cal_ce 3.4047 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4292 | lr_scale 1.000 | no-improve 2/20
+[member 2] step 1800/234591 (ep 0.02) | loss 3.3813 [1d:3.367 1w:3.390 1m:3.406 6m:3.386] | lr 3.00e-04 | 1.2 it/s | eta 3143m
+[member 2] step 1900/234591 (ep 0.02) | loss 3.3813 [1d:3.369 1w:3.382 1m:3.416 6m:3.459] | lr 3.00e-04 | 1.3 it/s | eta 2992m
+[member 2] step 2000/234591 (ep 0.03) | loss 3.3801 [1d:3.367 1w:3.384 1m:3.411 6m:3.437] | lr 3.00e-04 | 1.4 it/s | eta 2856m
+[member 2] EVAL step 2000 (ep 0.03) | stop-score +4.149 (smoothed +3.660, best +3.790) | t1d +3.42/125d t1w +2.45/121d | cal_ce 3.4052 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4249 | lr_scale 1.000 | no-improve 3/20
+[member 2] step 2100/234591 (ep 0.03) | loss 3.3890 [1d:3.366 1w:3.398 1m:3.430 6m:3.476] | lr 3.00e-04 | 1.3 it/s | eta 2957m
+[member 2] step 2200/234591 (ep 0.03) | loss 3.3791 [1d:3.359 1w:3.388 1m:3.419 6m:3.402] | lr 3.00e-04 | 1.4 it/s | eta 2836m
+[member 2] step 2300/234591 (ep 0.03) | loss 3.3728 [1d:3.357 1w:3.376 1m:3.416 6m:3.429] | lr 3.00e-04 | 1.4 it/s | eta 2725m
+[member 2] step 2400/234591 (ep 0.03) | loss 3.3790 [1d:3.362 1w:3.382 1m:3.426 6m:3.427] | lr 3.00e-04 | 1.5 it/s | eta 2624m
+[member 2] step 2500/234591 (ep 0.03) | loss 3.3783 [1d:3.368 1w:3.375 1m:3.412 6m:3.525] | lr 3.00e-04 | 1.5 it/s | eta 2530m
+[member 2] step 2600/234591 (ep 0.03) | loss 3.3765 [1d:3.361 1w:3.381 1m:3.414 6m:3.440] | lr 3.00e-04 | 1.6 it/s | eta 2444m
+[member 2] step 2700/234591 (ep 0.03) | loss 3.3770 [1d:3.361 1w:3.381 1m:3.418 6m:3.431] | lr 3.00e-04 | 1.6 it/s | eta 2364m
+[member 2] step 2800/234591 (ep 0.04) | loss 3.3747 [1d:3.362 1w:3.377 1m:3.405 6m:3.454] | lr 3.00e-04 | 1.7 it/s | eta 2290m
+[member 2] step 2900/234591 (ep 0.04) | loss 3.3734 [1d:3.351 1w:3.387 1m:3.387 6m:3.456] | lr 3.00e-04 | 1.7 it/s | eta 2221m
+[member 2] step 3000/234591 (ep 0.04) | loss 3.3743 [1d:3.358 1w:3.379 1m:3.404 6m:3.492] | lr 3.00e-04 | 1.8 it/s | eta 2156m
+[member 2] EVAL step 3000 (ep 0.04) | stop-score +4.328 (smoothed +4.149, best +4.149) | t1d +3.48/125d t1w +2.64/121d | cal_ce 3.3998 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4165 | lr_scale 1.000 | IMPROVED
+[member 2] step 3100/234591 (ep 0.04) | loss 3.3800 [1d:3.369 1w:3.381 1m:3.405 6m:3.485] | lr 3.00e-04 | 1.7 it/s | eta 2237m
+[member 2] step 3200/234591 (ep 0.04) | loss 3.3644 [1d:3.355 1w:3.364 1m:3.395 6m:3.431] | lr 3.00e-04 | 1.8 it/s | eta 2176m
+[member 2] step 3300/234591 (ep 0.04) | loss 3.3720 [1d:3.356 1w:3.381 1m:3.390 6m:3.448] | lr 3.00e-04 | 1.8 it/s | eta 2119m
+[member 2] step 3400/234591 (ep 0.04) | loss 3.3727 [1d:3.357 1w:3.381 1m:3.395 6m:3.436] | lr 3.00e-04 | 1.9 it/s | eta 2065m
+[member 2] step 3500/234591 (ep 0.04) | loss 3.3788 [1d:3.362 1w:3.384 1m:3.410 6m:3.448] | lr 3.00e-04 | 1.9 it/s | eta 2014m
+[member 2] step 3600/234591 (ep 0.05) | loss 3.3659 [1d:3.356 1w:3.366 1m:3.403 6m:3.399] | lr 3.00e-04 | 2.0 it/s | eta 1966m
+[member 2] step 3700/234591 (ep 0.05) | loss 3.3669 [1d:3.358 1w:3.370 1m:3.382 6m:3.445] | lr 3.00e-04 | 2.0 it/s | eta 1920m
+[member 2] step 3800/234591 (ep 0.05) | loss 3.3746 [1d:3.364 1w:3.378 1m:3.396 6m:3.425] | lr 3.00e-04 | 2.0 it/s | eta 1877m
+[member 2] step 3900/234591 (ep 0.05) | loss 3.3725 [1d:3.361 1w:3.375 1m:3.401 6m:3.434] | lr 3.00e-04 | 2.1 it/s | eta 1836m
+[member 2] step 4000/234591 (ep 0.05) | loss 3.3764 [1d:3.371 1w:3.373 1m:3.404 6m:3.426] | lr 3.00e-04 | 2.1 it/s | eta 1798m
+[member 2] EVAL step 4000 (ep 0.05) | stop-score +3.457 (smoothed +4.149, best +4.149) | t1d +2.74/125d t1w +2.15/121d | cal_ce 3.4030 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4281 | lr_scale 1.000 | no-improve 1/20
+[member 2] step 4100/234591 (ep 0.05) | loss 3.3735 [1d:3.363 1w:3.379 1m:3.387 6m:3.416] | lr 3.00e-04 | 2.1 it/s | eta 1862m
+[member 2] step 4200/234591 (ep 0.05) | loss 3.3705 [1d:3.354 1w:3.376 1m:3.407 6m:3.391] | lr 3.00e-04 | 2.1 it/s | eta 1824m
+[member 2] step 4300/234591 (ep 0.05) | loss 3.3715 [1d:3.356 1w:3.377 1m:3.410 6m:3.386] | lr 3.00e-04 | 2.1 it/s | eta 1788m
+[member 2] step 4400/234591 (ep 0.06) | loss 3.3717 [1d:3.356 1w:3.376 1m:3.408 6m:3.451] | lr 3.00e-04 | 2.2 it/s | eta 1754m
+[member 2] step 4500/234591 (ep 0.06) | loss 3.3672 [1d:3.346 1w:3.374 1m:3.404 6m:3.474] | lr 3.00e-04 | 2.2 it/s | eta 1721m
+[member 2] step 4600/234591 (ep 0.06) | loss 3.3691 [1d:3.355 1w:3.373 1m:3.403 6m:3.451] | lr 3.00e-04 | 2.3 it/s | eta 1689m
+[member 2] step 4700/234591 (ep 0.06) | loss 3.3736 [1d:3.363 1w:3.375 1m:3.400 6m:3.428] | lr 3.00e-04 | 2.3 it/s | eta 1659m
+[member 2] step 4800/234591 (ep 0.06) | loss 3.3738 [1d:3.367 1w:3.373 1m:3.403 6m:3.394] | lr 3.00e-04 | 2.3 it/s | eta 1630m
+[member 2] step 4900/234591 (ep 0.06) | loss 3.3751 [1d:3.366 1w:3.373 1m:3.411 6m:3.440] | lr 3.00e-04 | 2.4 it/s | eta 1603m
+[member 2] step 5000/234591 (ep 0.06) | loss 3.3748 [1d:3.357 1w:3.384 1m:3.408 6m:3.377] | lr 3.00e-04 | 2.4 it/s | eta 1577m
+[member 2] EVAL step 5000 (ep 0.06) | stop-score +3.868 (smoothed +3.868, best +4.149) | t1d +2.91/125d t1w +2.56/121d | cal_ce 3.3950 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4150 | lr_scale 1.000 | no-improve 2/20
+[member 2] step 5100/234591 (ep 0.07) | loss 3.3702 [1d:3.361 1w:3.370 1m:3.403 6m:3.392] | lr 3.00e-04 | 2.3 it/s | eta 1634m
+[member 2] step 5200/234591 (ep 0.07) | loss 3.3695 [1d:3.353 1w:3.377 1m:3.389 6m:3.469] | lr 3.00e-04 | 2.4 it/s | eta 1607m
+[member 2] step 5300/234591 (ep 0.07) | loss 3.3717 [1d:3.361 1w:3.372 1m:3.405 6m:3.433] | lr 3.00e-04 | 2.4 it/s | eta 1582m
+[member 2] step 5400/234591 (ep 0.07) | loss 3.3650 [1d:3.346 1w:3.370 1m:3.405 6m:3.468] | lr 3.00e-04 | 2.5 it/s | eta 1557m
+[member 2] step 5500/234591 (ep 0.07) | loss 3.3646 [1d:3.352 1w:3.369 1m:3.390 6m:3.429] | lr 3.00e-04 | 2.5 it/s | eta 1534m
+[member 2] step 5600/234591 (ep 0.07) | loss 3.3793 [1d:3.371 1w:3.376 1m:3.418 6m:3.435] | lr 3.00e-04 | 2.5 it/s | eta 1511m
+[member 2] step 5700/234591 (ep 0.07) | loss 3.3733 [1d:3.360 1w:3.376 1m:3.403 6m:3.436] | lr 3.00e-04 | 2.6 it/s | eta 1490m
+[member 2] step 5800/234591 (ep 0.07) | loss 3.3717 [1d:3.364 1w:3.370 1m:3.404 6m:3.400] | lr 3.00e-04 | 2.6 it/s | eta 1469m
+[member 2] step 5900/234591 (ep 0.08) | loss 3.3625 [1d:3.350 1w:3.363 1m:3.397 6m:3.458] | lr 3.00e-04 | 2.6 it/s | eta 1448m
+[member 2] step 6000/234591 (ep 0.08) | loss 3.3658 [1d:3.361 1w:3.365 1m:3.382 6m:3.410] | lr 3.00e-04 | 2.7 it/s | eta 1429m
+[member 2] EVAL step 6000 (ep 0.08) | stop-score +4.284 (smoothed +3.868, best +4.149) | t1d +3.21/125d t1w +2.84/121d | cal_ce 3.3944 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4208 | lr_scale 1.000 | no-improve 3/20
+[member 2] step 6100/234591 (ep 0.08) | loss 3.3591 [1d:3.341 1w:3.368 1m:3.389 6m:3.425] | lr 3.00e-04 | 2.6 it/s | eta 1480m
+[member 2] step 6200/234591 (ep 0.08) | loss 3.3675 [1d:3.351 1w:3.375 1m:3.392 6m:3.439] | lr 3.00e-04 | 2.6 it/s | eta 1460m
+[member 2] step 6300/234591 (ep 0.08) | loss 3.3609 [1d:3.349 1w:3.363 1m:3.388 6m:3.430] | lr 3.00e-04 | 2.6 it/s | eta 1441m
+[member 2] step 6400/234591 (ep 0.08) | loss 3.3617 [1d:3.352 1w:3.361 1m:3.393 6m:3.459] | lr 3.00e-04 | 2.7 it/s | eta 1422m
+[member 2] step 6500/234591 (ep 0.08) | loss 3.3717 [1d:3.362 1w:3.370 1m:3.404 6m:3.477] | lr 3.00e-04 | 2.7 it/s | eta 1405m
+[member 2] step 6600/234591 (ep 0.08) | loss 3.3680 [1d:3.356 1w:3.371 1m:3.402 6m:3.427] | lr 3.00e-04 | 2.7 it/s | eta 1387m
+[member 2] step 6700/234591 (ep 0.09) | loss 3.3619 [1d:3.351 1w:3.366 1m:3.382 6m:3.449] | lr 3.00e-04 | 2.8 it/s | eta 1371m
+[member 2] step 6800/234591 (ep 0.09) | loss 3.3638 [1d:3.354 1w:3.367 1m:3.392 6m:3.369] | lr 3.00e-04 | 2.8 it/s | eta 1354m
+[member 2] step 6900/234591 (ep 0.09) | loss 3.3619 [1d:3.355 1w:3.362 1m:3.386 6m:3.368] | lr 3.00e-04 | 2.8 it/s | eta 1339m
+[member 2] step 7000/234591 (ep 0.09) | loss 3.3677 [1d:3.362 1w:3.369 1m:3.380 6m:3.415] | lr 3.00e-04 | 2.9 it/s | eta 1323m
+[member 2] LR DROP -> 1.50e-04 (scale 0.500) after 4 no-improve evals
+[member 2] EVAL step 7000 (ep 0.09) | stop-score +3.862 (smoothed +3.868, best +4.149) | t1d +2.99/125d t1w +2.47/121d | cal_ce 3.3938 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4179 | lr_scale 0.500 | no-improve 4/20
+[member 2] step 7100/234591 (ep 0.09) | loss 3.3610 [1d:3.346 1w:3.364 1m:3.400 6m:3.449] | lr 1.50e-04 | 2.8 it/s | eta 1369m
+[member 2] step 7200/234591 (ep 0.09) | loss 3.3650 [1d:3.351 1w:3.372 1m:3.386 6m:3.403] | lr 1.50e-04 | 2.8 it/s | eta 1354m
+[member 2] step 7300/234591 (ep 0.09) | loss 3.3683 [1d:3.358 1w:3.374 1m:3.382 6m:3.428] | lr 1.50e-04 | 2.8 it/s | eta 1338m
+[member 2] step 7400/234591 (ep 0.09) | loss 3.3632 [1d:3.360 1w:3.366 1m:3.357 6m:3.425] | lr 1.50e-04 | 2.9 it/s | eta 1324m
+[member 2] step 7500/234591 (ep 0.10) | loss 3.3561 [1d:3.346 1w:3.361 1m:3.360 6m:3.460] | lr 1.50e-04 | 2.9 it/s | eta 1309m
+[member 2] step 7600/234591 (ep 0.10) | loss 3.3635 [1d:3.347 1w:3.368 1m:3.400 6m:3.421] | lr 1.50e-04 | 2.9 it/s | eta 1295m
+[member 2] step 7700/234591 (ep 0.10) | loss 3.3534 [1d:3.343 1w:3.356 1m:3.380 6m:3.395] | lr 1.50e-04 | 2.9 it/s | eta 1282m
+[member 2] step 7800/234591 (ep 0.10) | loss 3.3572 [1d:3.347 1w:3.364 1m:3.363 6m:3.396] | lr 1.50e-04 | 3.0 it/s | eta 1269m
+[member 2] step 7900/234591 (ep 0.10) | loss 3.3669 [1d:3.358 1w:3.370 1m:3.382 6m:3.431] | lr 1.50e-04 | 3.0 it/s | eta 1256m
+[member 2] step 8000/234591 (ep 0.10) | loss 3.3635 [1d:3.353 1w:3.370 1m:3.375 6m:3.384] | lr 1.50e-04 | 3.0 it/s | eta 1244m
+[member 2] EVAL step 8000 (ep 0.10) | stop-score +3.678 (smoothed +3.862, best +4.149) | t1d +2.91/125d t1w +2.29/121d | cal_ce 3.3930 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4153 | lr_scale 0.500 | no-improve 5/20
+[member 2] step 8100/234591 (ep 0.10) | loss 3.3564 [1d:3.355 1w:3.350 1m:3.381 6m:3.401] | lr 1.50e-04 | 2.9 it/s | eta 1286m
+[member 2] step 8200/234591 (ep 0.10) | loss 3.3602 [1d:3.342 1w:3.369 1m:3.396 6m:3.364] | lr 1.50e-04 | 3.0 it/s | eta 1274m
+[member 2] step 8300/234591 (ep 0.11) | loss 3.3655 [1d:3.357 1w:3.362 1m:3.400 6m:3.432] | lr 1.50e-04 | 3.0 it/s | eta 1261m
+[member 2] step 8400/234591 (ep 0.11) | loss 3.3627 [1d:3.353 1w:3.366 1m:3.379 6m:3.412] | lr 1.50e-04 | 3.0 it/s | eta 1249m
+[member 2] step 8500/234591 (ep 0.11) | loss 3.3595 [1d:3.342 1w:3.371 1m:3.368 6m:3.442] | lr 1.50e-04 | 3.0 it/s | eta 1237m
+[member 2] step 8600/234591 (ep 0.11) | loss 3.3555 [1d:3.345 1w:3.360 1m:3.377 6m:3.383] | lr 1.50e-04 | 3.1 it/s | eta 1226m
+[member 2] step 8700/234591 (ep 0.11) | loss 3.3615 [1d:3.351 1w:3.361 1m:3.400 6m:3.398] | lr 1.50e-04 | 3.1 it/s | eta 1214m
+[member 2] step 8800/234591 (ep 0.11) | loss 3.3676 [1d:3.355 1w:3.367 1m:3.413 6m:3.434] | lr 1.50e-04 | 3.1 it/s | eta 1204m
+[member 2] step 8900/234591 (ep 0.11) | loss 3.3597 [1d:3.352 1w:3.359 1m:3.388 6m:3.412] | lr 1.50e-04 | 3.2 it/s | eta 1193m
+[member 2] step 9000/234591 (ep 0.12) | loss 3.3603 [1d:3.358 1w:3.354 1m:3.381 6m:3.448] | lr 1.50e-04 | 3.2 it/s | eta 1183m
+[member 2] EVAL step 9000 (ep 0.12) | stop-score +4.066 (smoothed +3.862, best +4.149) | t1d +3.18/125d t1w +2.58/121d | cal_ce 3.3915 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4140 | lr_scale 0.500 | no-improve 6/20
+[member 2] step 9100/234591 (ep 0.12) | loss 3.3599 [1d:3.355 1w:3.361 1m:3.373 6m:3.374] | lr 1.50e-04 | 3.1 it/s | eta 1223m
+[member 2] step 9200/234591 (ep 0.12) | loss 3.3603 [1d:3.349 1w:3.359 1m:3.393 6m:3.476] | lr 1.50e-04 | 3.1 it/s | eta 1212m
+[member 2] step 9300/234591 (ep 0.12) | loss 3.3526 [1d:3.335 1w:3.358 1m:3.390 6m:3.431] | lr 1.50e-04 | 3.1 it/s | eta 1202m
+[member 2] step 9400/234591 (ep 0.12) | loss 3.3608 [1d:3.347 1w:3.361 1m:3.405 6m:3.408] | lr 1.50e-04 | 3.2 it/s | eta 1191m
+[member 2] step 9500/234591 (ep 0.12) | loss 3.3551 [1d:3.348 1w:3.352 1m:3.378 6m:3.447] | lr 1.50e-04 | 3.2 it/s | eta 1181m
+[member 2] step 9600/234591 (ep 0.12) | loss 3.3622 [1d:3.357 1w:3.363 1m:3.375 6m:3.389] | lr 1.50e-04 | 3.2 it/s | eta 1171m
+[member 2] step 9700/234591 (ep 0.12) | loss 3.3607 [1d:3.351 1w:3.361 1m:3.388 6m:3.430] | lr 1.50e-04 | 3.2 it/s | eta 1162m
+[member 2] step 9800/234591 (ep 0.13) | loss 3.3594 [1d:3.355 1w:3.361 1m:3.371 6m:3.381] | lr 1.50e-04 | 3.3 it/s | eta 1153m
+[member 2] step 9900/234591 (ep 0.13) | loss 3.3624 [1d:3.352 1w:3.366 1m:3.372 6m:3.480] | lr 1.50e-04 | 3.3 it/s | eta 1143m
+[member 2] step 10000/234591 (ep 0.13) | loss 3.3649 [1d:3.351 1w:3.369 1m:3.397 6m:3.434] | lr 1.50e-04 | 3.3 it/s | eta 1135m
+[member 2] EVAL step 10000 (ep 0.13) | stop-score +4.034 (smoothed +4.034, best +4.149) | t1d +3.11/125d t1w +2.59/121d | cal_ce 3.3893 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4120 | lr_scale 0.500 | no-improve 7/20
+[member 2] step 10100/234591 (ep 0.13) | loss 3.3622 [1d:3.346 1w:3.366 1m:3.405 6m:3.426] | lr 1.50e-04 | 3.2 it/s | eta 1172m
+[member 2] step 10200/234591 (ep 0.13) | loss 3.3516 [1d:3.333 1w:3.358 1m:3.389 6m:3.413] | lr 1.50e-04 | 3.2 it/s | eta 1163m
+[member 2] step 10300/234591 (ep 0.13) | loss 3.3589 [1d:3.347 1w:3.363 1m:3.387 6m:3.395] | lr 1.50e-04 | 3.2 it/s | eta 1153m
+[member 2] step 10400/234591 (ep 0.13) | loss 3.3552 [1d:3.346 1w:3.356 1m:3.382 6m:3.380] | lr 1.50e-04 | 3.3 it/s | eta 1145m
+[member 2] step 10500/234591 (ep 0.13) | loss 3.3573 [1d:3.347 1w:3.358 1m:3.388 6m:3.416] | lr 1.50e-04 | 3.3 it/s | eta 1136m
+[member 2] step 10600/234591 (ep 0.14) | loss 3.3543 [1d:3.344 1w:3.358 1m:3.380 6m:3.373] | lr 1.50e-04 | 3.3 it/s | eta 1127m
+[member 2] step 10700/234591 (ep 0.14) | loss 3.3566 [1d:3.348 1w:3.359 1m:3.376 6m:3.387] | lr 1.50e-04 | 3.3 it/s | eta 1119m
+[member 2] step 10800/234591 (ep 0.14) | loss 3.3589 [1d:3.339 1w:3.367 1m:3.392 6m:3.445] | lr 1.50e-04 | 3.4 it/s | eta 1111m
+[member 2] step 10900/234591 (ep 0.14) | loss 3.3509 [1d:3.341 1w:3.352 1m:3.383 6m:3.399] | lr 1.50e-04 | 3.4 it/s | eta 1103m
+[member 2] step 11000/234591 (ep 0.14) | loss 3.3552 [1d:3.343 1w:3.363 1m:3.360 6m:3.406] | lr 1.50e-04 | 3.4 it/s | eta 1095m
+[member 2] LR DROP -> 7.50e-05 (scale 0.250) after 4 no-improve evals
+[member 2] EVAL step 11000 (ep 0.14) | stop-score +3.924 (smoothed +4.034, best +4.149) | t1d +3.02/125d t1w +2.53/121d | cal_ce 3.3913 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4117 | lr_scale 0.250 | no-improve 8/20
+[member 2] step 11100/234591 (ep 0.14) | loss 3.3608 [1d:3.355 1w:3.358 1m:3.389 6m:3.388] | lr 7.50e-05 | 3.3 it/s | eta 1130m
+[member 2] step 11200/234591 (ep 0.14) | loss 3.3572 [1d:3.342 1w:3.358 1m:3.407 6m:3.408] | lr 7.50e-05 | 3.3 it/s | eta 1122m
+[member 2] step 11300/234591 (ep 0.14) | loss 3.3570 [1d:3.349 1w:3.357 1m:3.383 6m:3.409] | lr 7.50e-05 | 3.3 it/s | eta 1114m
+[member 2] step 11400/234591 (ep 0.15) | loss 3.3516 [1d:3.341 1w:3.352 1m:3.376 6m:3.449] | lr 7.50e-05 | 3.4 it/s | eta 1106m
+[member 2] step 11500/234591 (ep 0.15) | loss 3.3603 [1d:3.343 1w:3.367 1m:3.389 6m:3.449] | lr 7.50e-05 | 3.4 it/s | eta 1098m
+[member 2] step 11600/234591 (ep 0.15) | loss 3.3552 [1d:3.341 1w:3.357 1m:3.393 6m:3.455] | lr 7.50e-05 | 3.4 it/s | eta 1091m
+[member 2] step 11700/234591 (ep 0.15) | loss 3.3501 [1d:3.348 1w:3.349 1m:3.361 6m:3.341] | lr 7.50e-05 | 3.4 it/s | eta 1084m
+[member 2] step 11800/234591 (ep 0.15) | loss 3.3611 [1d:3.355 1w:3.361 1m:3.377 6m:3.405] | lr 7.50e-05 | 3.4 it/s | eta 1077m
+[member 2] step 11900/234591 (ep 0.15) | loss 3.3547 [1d:3.352 1w:3.354 1m:3.364 6m:3.354] | lr 7.50e-05 | 3.5 it/s | eta 1070m
+[member 2] step 12000/234591 (ep 0.15) | loss 3.3532 [1d:3.351 1w:3.349 1m:3.370 6m:3.387] | lr 7.50e-05 | 3.5 it/s | eta 1063m
+[member 2] EVAL step 12000 (ep 0.15) | stop-score +4.372 (smoothed +4.034, best +4.149) | t1d +3.31/125d t1w +2.88/121d | cal_ce 3.3890 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4079 | lr_scale 0.250 | no-improve 9/20
+[member 2] step 12100/234591 (ep 0.15) | loss 3.3493 [1d:3.345 1w:3.343 1m:3.380 6m:3.419] | lr 7.50e-05 | 3.4 it/s | eta 1093m
+[member 2] step 12200/234591 (ep 0.16) | loss 3.3434 [1d:3.333 1w:3.342 1m:3.383 6m:3.383] | lr 7.50e-05 | 3.4 it/s | eta 1086m
+[member 2] step 12300/234591 (ep 0.16) | loss 3.3392 [1d:3.327 1w:3.339 1m:3.388 6m:3.348] | lr 7.50e-05 | 3.4 it/s | eta 1079m
+[member 2] step 12400/234591 (ep 0.16) | loss 3.3635 [1d:3.350 1w:3.371 1m:3.387 6m:3.354] | lr 7.50e-05 | 3.5 it/s | eta 1072m
+[member 2] step 12500/234591 (ep 0.16) | loss 3.3569 [1d:3.344 1w:3.361 1m:3.387 6m:3.393] | lr 7.50e-05 | 3.5 it/s | eta 1065m
+[member 2] step 12600/234591 (ep 0.16) | loss 3.3539 [1d:3.343 1w:3.354 1m:3.385 6m:3.441] | lr 7.50e-05 | 3.5 it/s | eta 1059m
+[member 2] step 12700/234591 (ep 0.16) | loss 3.3586 [1d:3.354 1w:3.355 1m:3.387 6m:3.401] | lr 7.50e-05 | 3.5 it/s | eta 1052m
+[member 2] step 12800/234591 (ep 0.16) | loss 3.3604 [1d:3.359 1w:3.353 1m:3.380 6m:3.487] | lr 7.50e-05 | 3.5 it/s | eta 1046m
+[member 2] step 12900/234591 (ep 0.16) | loss 3.3507 [1d:3.347 1w:3.349 1m:3.368 6m:3.405] | lr 7.50e-05 | 3.6 it/s | eta 1040m
+[member 2] step 13000/234591 (ep 0.17) | loss 3.3466 [1d:3.338 1w:3.351 1m:3.368 6m:3.327] | lr 7.50e-05 | 3.6 it/s | eta 1034m
+[member 2] EVAL step 13000 (ep 0.17) | stop-score +4.851 (smoothed +4.372, best +4.372) | t1d +3.63/125d t1w +3.23/121d | cal_ce 3.3872 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4119 | lr_scale 0.250 | IMPROVED
+[member 2] step 13100/234591 (ep 0.17) | loss 3.3564 [1d:3.349 1w:3.356 1m:3.374 6m:3.458] | lr 7.50e-05 | 3.5 it/s | eta 1061m
+[member 2] step 13200/234591 (ep 0.17) | loss 3.3504 [1d:3.339 1w:3.351 1m:3.380 6m:3.407] | lr 7.50e-05 | 3.5 it/s | eta 1055m
+[member 2] step 13300/234591 (ep 0.17) | loss 3.3532 [1d:3.343 1w:3.357 1m:3.377 6m:3.386] | lr 7.50e-05 | 3.5 it/s | eta 1049m
+[member 2] step 13400/234591 (ep 0.17) | loss 3.3539 [1d:3.347 1w:3.356 1m:3.372 6m:3.347] | lr 7.50e-05 | 3.5 it/s | eta 1042m
+[member 2] step 13500/234591 (ep 0.17) | loss 3.3564 [1d:3.346 1w:3.361 1m:3.374 6m:3.355] | lr 7.50e-05 | 3.6 it/s | eta 1037m
+[member 2] step 13600/234591 (ep 0.17) | loss 3.3634 [1d:3.357 1w:3.363 1m:3.383 6m:3.432] | lr 7.50e-05 | 3.6 it/s | eta 1031m
+[member 2] step 13700/234591 (ep 0.18) | loss 3.3414 [1d:3.328 1w:3.349 1m:3.358 6m:3.391] | lr 7.50e-05 | 3.6 it/s | eta 1025m
+[member 2] step 13800/234591 (ep 0.18) | loss 3.3464 [1d:3.334 1w:3.350 1m:3.368 6m:3.425] | lr 7.50e-05 | 3.6 it/s | eta 1019m
+[member 2] step 13900/234591 (ep 0.18) | loss 3.3575 [1d:3.347 1w:3.360 1m:3.383 6m:3.402] | lr 7.50e-05 | 3.6 it/s | eta 1014m
+[member 2] step 14000/234591 (ep 0.18) | loss 3.3589 [1d:3.349 1w:3.364 1m:3.379 6m:3.373] | lr 7.50e-05 | 3.6 it/s | eta 1008m
+[member 2] EVAL step 14000 (ep 0.18) | stop-score +4.757 (smoothed +4.757, best +4.757) | t1d +3.53/125d t1w +3.20/121d | cal_ce 3.3907 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4121 | lr_scale 0.250 | IMPROVED
+[member 2] step 14100/234591 (ep 0.18) | loss 3.3576 [1d:3.352 1w:3.353 1m:3.388 6m:3.409] | lr 7.50e-05 | 3.6 it/s | eta 1034m
+[member 2] step 14200/234591 (ep 0.18) | loss 3.3542 [1d:3.344 1w:3.354 1m:3.390 6m:3.411] | lr 7.50e-05 | 3.6 it/s | eta 1029m
+[member 2] step 14300/234591 (ep 0.18) | loss 3.3579 [1d:3.349 1w:3.360 1m:3.374 6m:3.446] | lr 7.50e-05 | 3.6 it/s | eta 1023m
+[member 2] step 14400/234591 (ep 0.18) | loss 3.3519 [1d:3.346 1w:3.352 1m:3.374 6m:3.358] | lr 7.50e-05 | 3.6 it/s | eta 1017m
+[member 2] step 14500/234591 (ep 0.19) | loss 3.3466 [1d:3.338 1w:3.349 1m:3.364 6m:3.417] | lr 7.50e-05 | 3.6 it/s | eta 1012m
+[member 2] step 14600/234591 (ep 0.19) | loss 3.3453 [1d:3.339 1w:3.349 1m:3.352 6m:3.351] | lr 7.50e-05 | 3.6 it/s | eta 1007m
+[member 2] step 14700/234591 (ep 0.19) | loss 3.3565 [1d:3.344 1w:3.365 1m:3.373 6m:3.333] | lr 7.50e-05 | 3.7 it/s | eta 1001m
+[member 2] step 14800/234591 (ep 0.19) | loss 3.3489 [1d:3.341 1w:3.353 1m:3.362 6m:3.358] | lr 7.50e-05 | 3.7 it/s | eta 996m
+[member 2] step 14900/234591 (ep 0.19) | loss 3.3410 [1d:3.335 1w:3.342 1m:3.358 6m:3.358] | lr 7.50e-05 | 3.7 it/s | eta 991m
+[member 2] step 15000/234591 (ep 0.19) | loss 3.3606 [1d:3.353 1w:3.359 1m:3.387 6m:3.421] | lr 7.50e-05 | 3.7 it/s | eta 986m
+[member 2] EVAL step 15000 (ep 0.19) | stop-score +4.661 (smoothed +4.757, best +4.757) | t1d +3.31/125d t1w +3.28/121d | cal_ce 3.3882 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4079 | lr_scale 0.250 | no-improve 1/20
+[member 2] step 15100/234591 (ep 0.19) | loss 3.3570 [1d:3.347 1w:3.361 1m:3.373 6m:3.392] | lr 7.50e-05 | 3.6 it/s | eta 1010m
+[member 2] step 15200/234591 (ep 0.19) | loss 3.3540 [1d:3.346 1w:3.358 1m:3.362 6m:3.397] | lr 7.50e-05 | 3.6 it/s | eta 1005m
+[member 2] step 15300/234591 (ep 0.20) | loss 3.3503 [1d:3.343 1w:3.350 1m:3.387 6m:3.335] | lr 7.50e-05 | 3.7 it/s | eta 1000m
+[member 2] step 15400/234591 (ep 0.20) | loss 3.3451 [1d:3.342 1w:3.343 1m:3.363 6m:3.344] | lr 7.50e-05 | 3.7 it/s | eta 995m
+[member 2] step 15500/234591 (ep 0.20) | loss 3.3558 [1d:3.341 1w:3.360 1m:3.389 6m:3.418] | lr 7.50e-05 | 3.7 it/s | eta 990m
+[member 2] step 15600/234591 (ep 0.20) | loss 3.3533 [1d:3.340 1w:3.362 1m:3.362 6m:3.411] | lr 7.50e-05 | 3.7 it/s | eta 985m
+[member 2] step 15700/234591 (ep 0.20) | loss 3.3480 [1d:3.342 1w:3.349 1m:3.372 6m:3.338] | lr 7.50e-05 | 3.7 it/s | eta 980m
+[member 2] step 15800/234591 (ep 0.20) | loss 3.3490 [1d:3.342 1w:3.351 1m:3.363 6m:3.394] | lr 7.50e-05 | 3.7 it/s | eta 975m
+[member 2] step 15900/234591 (ep 0.20) | loss 3.3522 [1d:3.342 1w:3.358 1m:3.363 6m:3.370] | lr 7.50e-05 | 3.8 it/s | eta 971m
+[member 2] step 16000/234591 (ep 0.20) | loss 3.3457 [1d:3.338 1w:3.343 1m:3.374 6m:3.426] | lr 7.50e-05 | 3.8 it/s | eta 966m
+[member 2] EVAL step 16000 (ep 0.20) | stop-score +4.453 (smoothed +4.661, best +4.757) | t1d +3.26/125d t1w +3.03/121d | cal_ce 3.3892 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4106 | lr_scale 0.250 | no-improve 2/20
+[member 2] step 16100/234591 (ep 0.21) | loss 3.3527 [1d:3.344 1w:3.354 1m:3.377 6m:3.405] | lr 7.50e-05 | 3.7 it/s | eta 989m
+[member 2] step 16200/234591 (ep 0.21) | loss 3.3556 [1d:3.351 1w:3.354 1m:3.377 6m:3.379] | lr 7.50e-05 | 3.7 it/s | eta 984m
+[member 2] step 16300/234591 (ep 0.21) | loss 3.3507 [1d:3.340 1w:3.359 1m:3.362 6m:3.365] | lr 7.50e-05 | 3.7 it/s | eta 979m
+[member 2] step 16400/234591 (ep 0.21) | loss 3.3483 [1d:3.340 1w:3.348 1m:3.379 6m:3.366] | lr 7.50e-05 | 3.7 it/s | eta 975m
+[member 2] step 16500/234591 (ep 0.21) | loss 3.3521 [1d:3.341 1w:3.356 1m:3.379 6m:3.374] | lr 7.50e-05 | 3.7 it/s | eta 970m
+[member 2] step 16600/234591 (ep 0.21) | loss 3.3572 [1d:3.345 1w:3.364 1m:3.375 6m:3.438] | lr 7.50e-05 | 3.8 it/s | eta 966m
+[member 2] step 16700/234591 (ep 0.21) | loss 3.3507 [1d:3.344 1w:3.350 1m:3.375 6m:3.373] | lr 7.50e-05 | 3.8 it/s | eta 961m
+[member 2] step 16800/234591 (ep 0.21) | loss 3.3473 [1d:3.339 1w:3.349 1m:3.361 6m:3.414] | lr 7.50e-05 | 3.8 it/s | eta 957m
+[member 2] step 16900/234591 (ep 0.22) | loss 3.3499 [1d:3.346 1w:3.344 1m:3.382 6m:3.375] | lr 7.50e-05 | 3.8 it/s | eta 952m
+[member 2] step 17000/234591 (ep 0.22) | loss 3.3575 [1d:3.352 1w:3.359 1m:3.377 6m:3.362] | lr 7.50e-05 | 3.8 it/s | eta 948m
+[member 2] EVAL step 17000 (ep 0.22) | stop-score +4.612 (smoothed +4.612, best +4.757) | t1d +3.49/125d t1w +3.03/121d | cal_ce 3.3873 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4076 | lr_scale 0.250 | no-improve 3/20
+[member 2] step 17100/234591 (ep 0.22) | loss 3.3513 [1d:3.344 1w:3.354 1m:3.372 6m:3.328] | lr 7.50e-05 | 3.7 it/s | eta 970m
+[member 2] step 17200/234591 (ep 0.22) | loss 3.3396 [1d:3.328 1w:3.344 1m:3.352 6m:3.445] | lr 7.50e-05 | 3.8 it/s | eta 965m
+[member 2] step 17300/234591 (ep 0.22) | loss 3.3488 [1d:3.343 1w:3.345 1m:3.382 6m:3.381] | lr 7.50e-05 | 3.8 it/s | eta 961m
+[member 2] step 17400/234591 (ep 0.22) | loss 3.3519 [1d:3.348 1w:3.348 1m:3.373 6m:3.402] | lr 7.50e-05 | 3.8 it/s | eta 956m
+[member 2] step 17500/234591 (ep 0.22) | loss 3.3481 [1d:3.341 1w:3.346 1m:3.368 6m:3.468] | lr 7.50e-05 | 3.8 it/s | eta 952m
+[member 2] step 17600/234591 (ep 0.23) | loss 3.3571 [1d:3.351 1w:3.359 1m:3.370 6m:3.402] | lr 7.50e-05 | 3.8 it/s | eta 948m
+[member 2] step 17700/234591 (ep 0.23) | loss 3.3501 [1d:3.341 1w:3.347 1m:3.394 6m:3.397] | lr 7.50e-05 | 3.8 it/s | eta 944m
+[member 2] step 17800/234591 (ep 0.23) | loss 3.3537 [1d:3.346 1w:3.354 1m:3.376 6m:3.401] | lr 7.50e-05 | 3.8 it/s | eta 940m
+[member 2] step 17900/234591 (ep 0.23) | loss 3.3524 [1d:3.343 1w:3.352 1m:3.387 6m:3.384] | lr 7.50e-05 | 3.9 it/s | eta 936m
+[member 2] step 18000/234591 (ep 0.23) | loss 3.3453 [1d:3.337 1w:3.345 1m:3.370 6m:3.425] | lr 7.50e-05 | 3.9 it/s | eta 932m
+[member 2] LR DROP -> 3.75e-05 (scale 0.125) after 4 no-improve evals
+[member 2] EVAL step 18000 (ep 0.23) | stop-score +4.906 (smoothed +4.612, best +4.757) | t1d +3.50/125d t1w +3.44/121d | cal_ce 3.3869 (36408 rows) | base 3.4251 BEAT | raw_tag0 3.4096 | lr_scale 0.125 | no-improve 4/20
+[member 2] step 18100/234591 (ep 0.23) | loss 3.3480 [1d:3.344 1w:3.344 1m:3.371 6m:3.436] | lr 3.75e-05 | 3.8 it/s | eta 952m
+[member 2] step 18200/234591 (ep 0.23) | loss 3.3460 [1d:3.339 1w:3.347 1m:3.365 6m:3.386] | lr 3.75e-05 | 3.8 it/s | eta 947m
+[member 2] step 18300/234591 (ep 0.23) | loss 3.3494 [1d:3.350 1w:3.344 1m:3.366 6m:3.398] | lr 3.75e-05 | 3.8 it/s | eta 943m
+[member 2] step 18400/234591 (ep 0.24) | loss 3.3452 [1d:3.340 1w:3.346 1m:3.355 6m:3.402] | lr 3.75e-05 | 3.8 it/s | eta 939m
+[member 2] step 18500/234591 (ep 0.24) | loss 3.3490 [1d:3.338 1w:3.354 1m:3.360 6m:3.433] | lr 3.75e-05 | 3.9 it/s | eta 935m
+[member 2] step 18600/234591 (ep 0.24) | loss 3.3493 [1d:3.336 1w:3.357 1m:3.360 6m:3.407] | lr 3.75e-05 | 3.9 it/s | eta 931m
+[member 2] step 18700/234591 (ep 0.24) | loss 3.3575 [1d:3.350 1w:3.359 1m:3.368 6m:3.430] | lr 3.75e-05 | 3.9 it/s | eta 928m
+[member 2] step 18800/234591 (ep 0.24) | loss 3.3558 [1d:3.351 1w:3.356 1m:3.360 6m:3.437] | lr 3.75e-05 | 3.9 it/s | eta 924m
+[member 2] step 18900/234591 (ep 0.24) | loss 3.3503 [1d:3.346 1w:3.346 1m:3.369 6m:3.448] | lr 3.75e-05 | 3.9 it/s | eta 920m
+[member 2] step 19000/234591 (ep 0.24) | loss 3.3493 [1d:3.342 1w:3.350 1m:3.364 6m:3.427] | lr 3.75e-05 | 3.9 it/s | eta 916m

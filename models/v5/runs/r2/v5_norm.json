@@ -1,0 +1,245 @@
+{
+  "feature_names_hash": "cf91a42347c678b3b218dc5ff205f44bb9b20ee672ae98bc0b017e2c6dd69bf9",
+  "channels": [
+    {
+      "name": "r_open",
+      "median": 0.0,
+      "scale": 0.018657885182557767,
+      "rule": "iqr"
+    },
+    {
+      "name": "r_high",
+      "median": 0.0,
+      "scale": 0.015224467858042516,
+      "rule": "iqr"
+    },
+    {
+      "name": "r_low",
+      "median": 0.0,
+      "scale": 0.01577726303647411,
+      "rule": "iqr"
+    },
+    {
+      "name": "r_close",
+      "median": 0.0,
+      "scale": 0.017831311889097725,
+      "rule": "iqr"
+    },
+    {
+      "name": "r_vol",
+      "median": -0.005887744016945362,
+      "scale": 0.5612347614685635,
+      "rule": "iqr"
+    },
+    {
+      "name": "gap_ma10",
+      "median": 0.0005449934396892786,
+      "scale": 0.031897234830527595,
+      "rule": "iqr"
+    },
+    {
+      "name": "gap_ma20",
+      "median": 0.0015653538284823298,
+      "scale": 0.0483482092994509,
+      "rule": "iqr"
+    },
+    {
+      "name": "gap_ma30",
+      "median": 0.002511463360860944,
+      "scale": 0.0611261676602049,
+      "rule": "iqr"
+    },
+    {
+      "name": "gap_ema10",
+      "median": 0.0006200355710461736,
+      "scale": 0.02709977477899386,
+      "rule": "iqr"
+    },
+    {
+      "name": "gap_ema30",
+      "median": 0.0021825239527970552,
+      "scale": 0.05276572633067973,
+      "rule": "iqr"
+    },
+    {
+      "name": "boll_pos",
+      "median": 0.5181623101234436,
+      "scale": 0.3841451201463647,
+      "rule": "iqr"
+    },
+    {
+      "name": "boll_width",
+      "median": 0.13578447699546814,
+      "scale": 0.10516220569787334,
+      "rule": "iqr"
+    },
+    {
+      "name": "macd_rel",
+      "median": 0.001119692693464458,
+      "scale": 0.02290636371459406,
+      "rule": "iqr"
+    },
+    {
+      "name": "macd_sig_rel",
+      "median": 0.0011292677372694016,
+      "scale": 0.021715986585897636,
+      "rule": "iqr"
+    },
+    {
+      "name": "rsi",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "zscore",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "Volatility_10",
+      "median": 0.02039693109691143,
+      "scale": 0.014813227497532775,
+      "rule": "iqr"
+    },
+    {
+      "name": "Volatility_20",
+      "median": 0.021685412153601646,
+      "scale": 0.014893506088185699,
+      "rule": "iqr"
+    },
+    {
+      "name": "Volatility_30",
+      "median": 0.022311399690806866,
+      "scale": 0.014985697702943087,
+      "rule": "iqr"
+    },
+    {
+      "name": "volatility_5d",
+      "median": 0.29480212926864624,
+      "scale": 0.23769497528970462,
+      "rule": "iqr"
+    },
+    {
+      "name": "volatility_20d",
+      "median": 0.3442452549934387,
+      "scale": 0.23642711457364907,
+      "rule": "iqr"
+    },
+    {
+      "name": "log_sigma_hat",
+      "median": -3.7942283153533936,
+      "scale": 0.6177837182363817,
+      "rule": "iqr"
+    },
+    {
+      "name": "vol_z",
+      "median": -0.025697246193885803,
+      "scale": 0.9860466085954275,
+      "rule": "iqr"
+    },
+    {
+      "name": "fg",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "fg_corr",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "overnight_gap",
+      "median": 0.0,
+      "scale": 0.007234787495269698,
+      "rule": "iqr"
+    },
+    {
+      "name": "abnormal_vol",
+      "median": -0.2726868689060211,
+      "scale": 0.7646909526226873,
+      "rule": "iqr"
+    },
+    {
+      "name": "momentum_5d",
+      "median": 0.0,
+      "scale": 0.04243992788204889,
+      "rule": "iqr"
+    },
+    {
+      "name": "momentum_20d",
+      "median": 0.003644646843895316,
+      "scale": 0.08994977703087413,
+      "rule": "iqr"
+    },
+    {
+      "name": "skew_5d",
+      "median": 0.050316836684942245,
+      "scale": 0.9801560989391194,
+      "rule": "iqr"
+    },
+    {
+      "name": "intraday_range",
+      "median": 0.02678571455180645,
+      "scale": 0.02221504379591295,
+      "rule": "iqr"
+    },
+    {
+      "name": "sin_week",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "cos_week",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "sin_month",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "cos_month",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "sin_year",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "cos_year",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "sin_year4",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "cos_year4",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    },
+    {
+      "name": "is_pad",
+      "median": 0.0,
+      "scale": 1.0,
+      "rule": "identity"
+    }
+  ]
+}
