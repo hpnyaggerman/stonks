@@ -18,6 +18,18 @@ This writes `TrainingData/session_census.csv` (one row per feed date with its di
 
 Disk: each trainer process writes a ~2.1 GB feature memmap into its own `cache/v5_gpu{k}`; the build refuses to start without 1.2x the memmap size free.
 
+### Memory and hardware budget
+
+Feed content (measured from the shards): 41.95M rows total; 26.37M US (NASDAQ 13.04M, NYSE 12.64M, AMEX 0.58M, rest small), 15.59M non-US (Shenzhen/Shanghai A-shares SHE 8.81M + SHG 6.50M, B-boards SHGB 0.16M + SHEB 0.12M). "Non-US" below means that Chinese complement.
+
+VRAM is universe-independent: the footprint is activation-bound at the model geometry (batch 256 x window 252 x d_model 256, 6 blocks, bf16 autocast) while the data reaches the device one ~10 MiB batch at a time (memmap-backed dataset, per-item window slicing, host-side logit accumulation). Per member: ~94 MiB weights+grads+AdamW moments (6.15M params) + ~5 GiB activations (measured 29.4 MiB/sample fp32 for the non-Mamba graph via saved-tensor accounting, halved under bf16, plus ~1 MiB/sample/block for the fused-kernel saves) + CUDA context, so budget ~6-8 GiB per member per GPU. The fused `mamba-ssm` kernel is mandatory for training: the pure-PyTorch `MambaRef` path saves ~158 MiB/sample (materialized scan states) = ~40 GiB at batch 256, which no 32 GB card fits.
+
+Host RAM scales with the universe. Resident: feature frames at a measured 253 B/row (US 6.2 GiB, non-US 3.7 GiB). Transients that co-reside with the frames: the scaler-fit train-row concat (40 float32 columns; US 3.6 GiB at the measured 23.95M train rows, non-US ~2.0 GiB), the centering pass (~0.3 GiB per horizon), and the sample-bucket build before array packing (~350 B per train anchor of Python-object overhead; US ~7.3 GiB, non-US ~4.3 GiB). Peak is frames + bucket build: US ~14-16 GiB, non-US ~8-10 GiB; add the finalize's fp16 logit cache (~0.3 GiB at 4 members x 150k windows). Budget 32 GiB host RAM for the US run (run-2 died on a thinner margin), 16 GiB for non-US.
+
+Disk per case: fp16 memmap 80 B/row -- US 2.0 GiB, non-US 1.2 GiB -- times one copy per concurrent trainer process (4 on the 4-GPU box) until the finalize deletes the duplicates, plus the 600 MB parquet shards.
+
+A non-US run is not wired up: `load_us_ohlcv` / `list_us_tickers` / the census tool all hardcode `US_EXCHANGES`, the fear/greed channel is a US-market sentiment index, and the score floors / gates were designed against the US cross-section. The figures above size the hardware only.
+
 Sanity before anything: `python3 tests/run_tests.py` (dependency-free, CPU) and a smoke pass `python3 run_train_v5.py --smoke --run-dir /tmp/v5_smoke --cache-dir /tmp/v5_smoke_cache`. Never run `--smoke` with the default `--run-dir`: it would overwrite `models/v5/member_*.pt`.
 
 ## 1. One-time protocol steps (before the first corrected run)

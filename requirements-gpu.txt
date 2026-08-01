@@ -2,5 +2,9 @@
 # Install against a CUDA 12 build of PyTorch (torch>=2.4); bf16 autocast needs an
 # Ampere-or-newer GPU (compute capability >= 8.0). CPU-only hosts need none of these:
 # the model falls back to the pure-PyTorch block in v5/mamba_ref.py for scoring and tests.
+# Memory: ~6-8 GiB VRAM per ensemble member at the default geometry (batch 256,
+# window 252, d_model 256); the fused kernel is what makes training fit -- the
+# MambaRef fallback saves ~40 GiB of scan states at batch 256 and cannot train.
+# Host RAM: ~16 GiB peak for the US universe build; see docs/v5_run_guide.md.
 mamba-ssm==2.2.4
 causal-conv1d>=1.5.0
